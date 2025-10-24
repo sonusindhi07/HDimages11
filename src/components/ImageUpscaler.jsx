@@ -64,24 +64,32 @@ export default function ImageUpscaler() {
   const [images, setImages] = useState([]);
   const [converted, setConverted] = useState({});
   const [processing, setProcessing] = useState(false);
+  const [isDragging, setIsDragging] = useState(false); // New state for drag-and-drop visual feedback
   const inputRef = useRef();
 
   // Only show upload button at first
   const [hasUploaded, setHasUploaded] = useState(false);
 
+  // The core function to process a list of files (from input or drop)
   const handleFiles = useCallback((fileList) => {
+    // Filter to only include image files
+    const imageFiles = Array.from(fileList).filter(file => file.type.startsWith('image/'));
+    
+    if (imageFiles.length === 0) return;
+
     setImages([]);
     setConverted({});
     setProcessing(true);
     setHasUploaded(true);
-    const files = Array.from(fileList);
+    
     let loaded = 0;
     let imageInfos = [];
-    files.forEach((file, idx) => {
+    imageFiles.forEach((file, idx) => {
       const img = new window.Image();
       img.onload = () => {
         const width = img.width;
         const height = img.height;
+        // Unique ID for the image
         const id = `${file.name}_${file.size}_${file.lastModified}`;
         const src = URL.createObjectURL(file);
         const { width: newWidth, height: newHeight } = getTargetSize(
@@ -115,17 +123,33 @@ export default function ImageUpscaler() {
                   name: hdName,
                 },
               }));
+              
+              // After conversion, check if all files have been loaded and processed
+              loaded += 1;
+              if (loaded === imageFiles.length) {
+                setImages(imageInfos.filter(info => !info.error)); // Only show successful loads
+                setProcessing(false);
+              }
             },
             file.name
           );
         };
+        autoImg.onerror = () => {
+          // If the conversion Image load fails
+          imageInfos[idx] = {
+            error: "Failed to load image for processing.",
+            file,
+            id: `${file.name}_${file.size}_${file.lastModified}`,
+          };
+          loaded += 1;
+          if (loaded === imageFiles.length) {
+            setImages(imageInfos.filter(info => !info.error));
+            setProcessing(false);
+          }
+        };
         autoImg.src = src;
 
-        loaded += 1;
-        if (loaded === files.length) {
-          setImages(imageInfos);
-          setProcessing(false);
-        }
+        // The image object for dimension reading is already loaded, no need to wait again
       };
       img.onerror = () => {
         imageInfos[idx] = {
@@ -134,14 +158,46 @@ export default function ImageUpscaler() {
           id: `${file.name}_${file.size}_${file.lastModified}`,
         };
         loaded += 1;
-        if (loaded === files.length) {
-          setImages(imageInfos);
+        if (loaded === imageFiles.length) {
+          setImages(imageInfos.filter(info => !info.error));
           setProcessing(false);
         }
       };
       img.src = URL.createObjectURL(file);
     });
   }, []);
+  
+  // --- New Drag-and-Drop Handlers ---
+  const handleDragEnter = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.dataTransfer.items && e.dataTransfer.items.length > 0) {
+      setIsDragging(true);
+    }
+  };
+
+  const handleDragLeave = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  };
+
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!isDragging) setIsDragging(true); // Ensure drag state is true during the drag
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      handleFiles(e.dataTransfer.files);
+      e.dataTransfer.clearData();
+    }
+  };
+  // ------------------------------------
 
   const handleDownloadAllConverted = () => {
     images.forEach((img) => {
@@ -160,22 +216,44 @@ export default function ImageUpscaler() {
     setImages([]);
     setConverted({});
     setHasUploaded(false);
+    // Important: Reset the file input value so that selecting the same file(s) again triggers onChange
+    if (inputRef.current) {
+        inputRef.current.value = '';
+    }
   };
 
+  // Define the base style and the drag-over style
+  const baseStyle = {
+    margin: "40px auto",
+    fontFamily: "Inter,Segoe UI,Arial,sans-serif",
+    background: "#fff",
+    borderRadius: 16,
+    boxShadow: "0 8px 32px #0001, 0 1.5px 7px #1976d211",
+    padding: "32px 22px 40px 22px",
+    transition: "box-shadow 0.3s, border 0.3s",
+    border: '3px dashed transparent', // Base border
+  };
+
+  const dragOverStyle = {
+    border: '3px dashed #1976d2', // Drag-over visual feedback
+    boxShadow: "0 8px 32px #1976d222, 0 1.5px 7px #1976d211",
+  };
+  
   return (
     <div
-      style={{
-        margin: "40px auto",
-        fontFamily: "Inter,Segoe UI,Arial,sans-serif",
-        background: "#fff",
-        borderRadius: 16,
-        boxShadow: "0 8px 32px #0001, 0 1.5px 7px #1976d211",
-        padding: "32px 22px 40px 22px",
-      }}
+      style={{ ...baseStyle, ...(isDragging ? dragOverStyle : {}) }}
+      onDragEnter={handleDragEnter}
+      onDragLeave={handleDragLeave}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
     >
+      <div style={{ textAlign: "center", color: "#607d8b" }}>
+        Drop files anywhere in this box or use the button below.
+      </div>
+
       {/* Only show upload button at first */}
       {!hasUploaded && (
-        <div style={{ marginBottom: 28, textAlign: "center" }}>
+        <div style={{ marginBottom: 28, textAlign: "center", marginTop: 10 }}>
           <button
             style={{
               padding: "13px 32px",
@@ -193,6 +271,7 @@ export default function ImageUpscaler() {
           >
             Upload Images
           </button>
+          {/* Key change: 'multiple' attribute is present, making multi-selection possible on all devices */}
           <input
             ref={inputRef}
             type="file"
@@ -224,11 +303,11 @@ export default function ImageUpscaler() {
                 fontWeight: "bold",
                 fontSize: 17,
                 boxShadow: "0 1.5px 8px #388e3c22",
-                cursor: images.length === 0 ? "not-allowed" : "pointer",
-                opacity: images.length === 0 ? 0.7 : 1,
+                cursor: images.length === 0 || processing ? "not-allowed" : "pointer",
+                opacity: images.length === 0 || processing ? 0.7 : 1,
               }}
               onClick={handleDownloadAllConverted}
-              disabled={images.length === 0}
+              disabled={images.length === 0 || processing}
             >
               Download All Images
             </button>
@@ -248,6 +327,30 @@ export default function ImageUpscaler() {
             >
               New Image
             </button>
+            <button
+            style={{
+                padding: "10px 22px",
+                background: "#607d8b",
+                color: "#fff",
+                border: "none",
+                borderRadius: 6,
+                fontWeight: "bold",
+                fontSize: 17,
+                boxShadow: "0 1.5px 8px #607d8b22",
+                cursor: "pointer",
+            }}
+            onClick={() => inputRef.current && inputRef.current.click()}
+            >
+            Add More
+            </button>
+            <input
+              ref={inputRef}
+              type="file"
+              accept="image/*"
+              multiple
+              style={{ display: "none" }}
+              onChange={(e) => handleFiles(e.target.files)}
+            />
           </div>
           {processing && (
             <div
@@ -313,6 +416,26 @@ export default function ImageUpscaler() {
                     >
                       <b>New Resolution:</b> {img.newWidth} × {img.newHeight}
                     </div>
+                    {converted[img.id] && (
+                        <a
+                            href={converted[img.id].src}
+                            download={converted[img.id].name}
+                            style={{
+                                display: 'block',
+                                textAlign: 'center',
+                                marginTop: 10,
+                                padding: '8px 16px',
+                                background: '#388e3c',
+                                color: '#fff',
+                                textDecoration: 'none',
+                                borderRadius: 5,
+                                fontWeight: 500,
+                                fontSize: 15,
+                            }}
+                        >
+                            Download {converted[img.id].name}
+                        </a>
+                    )}
                   </>
                 )}
               </div>
@@ -323,4 +446,3 @@ export default function ImageUpscaler() {
     </div>
   );
 }
-
