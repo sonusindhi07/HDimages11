@@ -2,9 +2,23 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Lightbulb, CheckCircle, Edit, Loader2, RefreshCw, Send, Maximize, Minimize } from 'lucide-react';
 
 // --- Firebase and Gemini API Setup ---
-// The API Key will be automatically handled by the environment if left as an empty string.
-const apiKey = ""; 
-const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+
+// Function to retrieve the API Key. 
+const getApiKey = () => {
+    // 1. Check for Canvas environment injection (if defined)
+    if (typeof __api_key !== 'undefined' && __api_key) {
+        return __api_key;
+    }
+    
+    // 2. Fallback for external environments (e.g., Codespaces, local React).
+    // IMPORTANT: In Codespaces, replace 'YOUR_GEMINI_API_KEY_HERE' with your actual key.
+    const hardcodedKey = 'AIzaSyC9db72ypINrGqHMN6HxfnfkVk1DvRONrI'; 
+    
+    return hardcodedKey !== 'YOUR_GEMINI_API_KEY_HERE' ? hardcodedKey : '';
+};
+
+const API_KEY = getApiKey();
+const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${API_KEY}`;
 
 // The specific JSON structure we expect from the API
 const RESPONSE_SCHEMA = {
@@ -101,6 +115,13 @@ const App = () => {
       alert("Please paste the article text or upload an image first.");
       return;
     }
+    
+    // API Key Validation Check for Codespaces/External Environments
+    if (!API_KEY) {
+        alert("The Gemini API Key is missing. In external environments like Codespaces, you must provide your key by manually editing the 'ReporterEditorTool.jsx' file.");
+        setIsLoading(false);
+        return;
+    }
 
     setIsLoading(true);
     let tempContent = analyzedContent;
@@ -146,7 +167,7 @@ const App = () => {
       const jsonString = result?.candidates?.[0]?.content?.parts?.[0]?.text;
 
       if (!jsonString) {
-        throw new Error("API response was empty or malformed.");
+        throw new Error("API response was empty or malformed or failed to authorize.");
       }
 
       const parsedJson = JSON.parse(jsonString);
