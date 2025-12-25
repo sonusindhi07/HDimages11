@@ -63,38 +63,40 @@ const App = () => {
   const loadData = async () => {
     dispatch({ type: 'FETCH_START' });
     try {
-      // First, try to get the specific resource
-      const response = await fetch(`${BASE_URL}/${RESOURCE_ID}`);
+      // Attempt to fetch all data first to see if the collection is even accessible
+      const checkAll = await fetch(BASE_URL);
       
-      if (response.ok) {
-        const result = await response.json();
-        dispatch({ type: 'FETCH_SUCCESS', payload: result.data || [] });
+      if (!checkAll.ok) {
+        throw new Error(`Cloud storage is currently unreachable (Error ${checkAll.status})`);
+      }
+
+      const allData = await checkAll.json();
+      
+      // Look for our target resource in the list
+      const targetResource = Array.isArray(allData) ? allData.find(item => item.id === RESOURCE_ID) : null;
+
+      if (targetResource) {
+        dispatch({ type: 'FETCH_SUCCESS', payload: targetResource.data || [] });
         return;
       }
 
-      // If resource not found (404), check if the collection is empty
-      if (response.status === 404) {
-        const checkAll = await fetch(BASE_URL);
-        const allData = await checkAll.json();
-        
-        // If there's already data but ID mismatch, use the first one available
+      // If target doesn't exist, try to initialize it
+      const createResponse = await fetch(BASE_URL, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ id: RESOURCE_ID, data: [] })
+      });
+      
+      if (!createResponse.ok) {
+        // If POST failed, but we have other data, just use the first available record as a fallback
         if (Array.isArray(allData) && allData.length > 0) {
           dispatch({ type: 'FETCH_SUCCESS', payload: allData[0].data || [] });
           return;
         }
-
-        // If truly empty, initialize the first record
-        const createResponse = await fetch(BASE_URL, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ id: RESOURCE_ID, data: [] })
-        });
-        
-        if (!createResponse.ok) throw new Error('Could not initialize storage on server');
-        dispatch({ type: 'FETCH_SUCCESS', payload: [] });
-      } else {
-        throw new Error(`Server returned ${response.status}: ${response.statusText}`);
+        throw new Error('Could not initialize storage. The API might be full or restricted.');
       }
+      
+      dispatch({ type: 'FETCH_SUCCESS', payload: [] });
     } catch (err) {
       dispatch({ type: 'FETCH_ERROR', payload: err.message });
     }
@@ -107,16 +109,21 @@ const App = () => {
   const persistToMockAPI = async (newAlbums) => {
     dispatch({ type: 'SYNC_START' });
     try {
-      // We assume RESOURCE_ID exists after successful loadData
       const response = await fetch(`${BASE_URL}/${RESOURCE_ID}`, {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ data: newAlbums })
       });
-      if (!response.ok) throw new Error('Sync failed');
+      // If PUT fails with 404/500, attempt to POST (re-initialize) if it was deleted
+      if (!response.ok) {
+         await fetch(BASE_URL, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ id: RESOURCE_ID, data: newAlbums })
+        });
+      }
     } catch (err) {
       console.error("API Sync Error:", err);
-      // Optional: show a small toast/notification instead of full error screen
     } finally {
       dispatch({ type: 'SYNC_END' });
     }
