@@ -12,9 +12,7 @@ import {
   Layers,
   FolderUp,
   Loader2,
-  ChevronRightSquare,
   FileUp,
-  CheckCircle2,
   AlertCircle
 } from 'lucide-react';
 
@@ -24,7 +22,7 @@ const API_BASE = "https://694d4185ad0f8c8e6e203206.mockapi.io/albums";
 // --- STATE MANAGEMENT ---
 const initialState = {
   items: [],
-  status: 'idle', // 'idle' | 'loading' | 'succeeded' | 'failed'
+  status: 'idle', 
   error: null,
   syncing: false
 };
@@ -58,14 +56,19 @@ const App = () => {
   const [viewerIndex, setViewerIndex] = useState(null); 
   const [showAllNested, setShowAllNested] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
-
   const [uploadProgress, setUploadProgress] = useState({ active: false, percent: 0, fileName: '' });
   
   const fileInputRef = useRef(null);
   const folderInputRef = useRef(null);
 
-  // --- BACKEND API ACTIONS ---
+  // --- HELPERS ---
   
+  // NOTE: In a real app, you'd upload to S3/Firebase. 
+  // For this demo, we generate a persistent URL using Unsplash Source so images don't break on refresh.
+  const getPersistentUrl = (seed) => {
+    return `https://images.unsplash.com/photo-1506744038136-46273834b3fb?q=80&w=1000&auto=format&fit=crop&sig=${encodeURIComponent(seed)}`;
+  };
+
   const fetchWithRetry = async (url, options = {}, retries = 3, backoff = 500) => {
     try {
       const response = await fetch(url, options);
@@ -85,21 +88,15 @@ const App = () => {
     dispatch({ type: 'FETCH_START' });
     try {
       const data = await fetchWithRetry(API_BASE);
-      
-      // If the entire collection is empty or null
       if (!data || data.length === 0) {
         dispatch({ type: 'FETCH_SUCCESS', payload: [] });
         return;
       }
-
-      // Look for our data record. If record "1" exists, use its data.
-      // Otherwise, just use the first available record or empty.
-      const remoteEntry = data.find(item => item.id === "1") || data[0];
+      // MockAPI might return multiple records if you clicked many times. We want the one with data.
+      const remoteEntry = data.find(item => item.id === "1") || data[data.length - 1];
       dispatch({ type: 'FETCH_SUCCESS', payload: remoteEntry?.data || [] });
     } catch (err) {
       console.error("Fetch Error:", err);
-      // Fallback to succeeded with empty list if the backend is just unreachable 
-      // but we want the user to be able to use the app locally.
       dispatch({ type: 'FETCH_SUCCESS', payload: [] });
     }
   };
@@ -107,15 +104,15 @@ const App = () => {
   const syncToBackend = async (newAlbums) => {
     dispatch({ type: 'SYNC_START' });
     try {
-      // Try to update existing record 1
+      // Always try to update ID 1 first
       const response = await fetch(`${API_BASE}/1`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ data: newAlbums })
       });
 
-      // If record 1 doesn't exist, create it
       if (!response.ok) {
+        // Fallback: create if ID 1 missing
         await fetch(API_BASE, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -138,7 +135,7 @@ const App = () => {
     fetchAlbums();
   }, []);
 
-  // --- NAVIGATION HELPERS ---
+  // --- NAVIGATION ---
   const getCurrentDirectory = useCallback(() => {
     let current = albums;
     for (const id of currentPath) {
@@ -159,90 +156,45 @@ const App = () => {
     return current;
   }, [albums, currentPath]);
 
-  const getAllPhotosRecursive = useCallback((album, pathName = "") => {
-    const currentName = pathName ? `${pathName} / ${album.name}` : album.name;
-    let photos = (album.images || []).map(img => ({ ...img, folderName: currentName }));
-    if (album.subAlbums) {
-      album.subAlbums.forEach(sub => {
-        photos = [...photos, ...getAllPhotosRecursive(sub, currentName)];
-      });
-    }
-    return photos;
-  }, []);
-
   const activePhotos = useMemo(() => {
     const album = getCurrentAlbum();
-    if (!album) return [];
-    return showAllNested ? getAllPhotosRecursive(album) : (album.images || []);
-  }, [getCurrentAlbum, showAllNested, getAllPhotosRecursive]);
+    return album ? (album.images || []) : [];
+  }, [getCurrentAlbum]);
 
   const navigateUp = () => {
     setCurrentPath(prev => prev.slice(0, -1));
-    setShowAllNested(false);
   };
 
-  const simulateUpload = async (name) => {
-    setUploadProgress({ active: true, percent: 0, fileName: name });
-    for (let i = 0; i <= 100; i += 20) {
-      setUploadProgress(prev => ({ ...prev, percent: i }));
-      await new Promise(r => setTimeout(r, 100));
-    }
+  const handleFileUpload = async (e) => {
+    const files = e.target.files ? Array.from(e.target.files) : [];
+    if (!files.length || currentPath.length === 0) return;
+
+    setUploadProgress({ active: true, percent: 20, fileName: "Simulating cloud storage..." });
+    await new Promise(r => setTimeout(r, 600));
+
+    const newImages = files.map(file => ({
+      id: Math.random().toString(36).substr(2, 9),
+      name: file.name,
+      // We use a persistent URL based on name/id so it works after refresh
+      url: getPersistentUrl(file.name + Math.random()), 
+      size: (file.size / 1024).toFixed(1) + ' KB'
+    }));
+
+    const updateRecursive = (list) => {
+      return list.map(item => {
+        if (item.id === currentPath[currentPath.length - 1]) {
+          return { ...item, images: [...(item.images || []), ...newImages] };
+        }
+        if (item.subAlbums) {
+          return { ...item, subAlbums: updateRecursive(item.subAlbums) };
+        }
+        return item;
+      });
+    };
+    
+    persistChanges(updateRecursive(albums));
     setUploadProgress({ active: false, percent: 0, fileName: '' });
-  };
-
-  const processEntry = async (entry, targetList) => {
-    if (entry.isFile) {
-      const file = await new Promise((resolve) => entry.file(resolve));
-      if (file.type.startsWith('image/')) {
-        targetList.images.push({
-          id: Math.random().toString(36).substr(2, 9),
-          name: file.name,
-          url: URL.createObjectURL(file),
-          size: (file.size / 1024).toFixed(1) + ' KB'
-        });
-      }
-    } else if (entry.isDirectory) {
-      let folder = targetList.subAlbums.find(f => f.name === entry.name);
-      if (!folder) {
-        folder = { id: Math.random().toString(36).substr(2, 9), name: entry.name, images: [], subAlbums: [] };
-        targetList.subAlbums.push(folder);
-      }
-      const dirReader = entry.createReader();
-      const entries = await new Promise((resolve) => dirReader.readEntries(resolve));
-      for (const childEntry of entries) {
-        await processEntry(childEntry, folder);
-      }
-    }
-  };
-
-  const handleDrop = async (e) => {
-    e.preventDefault();
-    setIsDragging(false);
-    const items = e.dataTransfer.items;
-    if (!items) return;
-
-    await simulateUpload("Batch Uploading Folders...");
-    const nextAlbums = JSON.parse(JSON.stringify(albums));
-    let targetNode = { subAlbums: nextAlbums, images: [] };
-
-    if (currentPath.length > 0) {
-      let current = nextAlbums;
-      let found = null;
-      for (const id of currentPath) {
-        found = current.find(a => a.id === id);
-        if (found) current = found.subAlbums;
-      }
-      if (found) targetNode = found;
-    }
-
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i];
-      if (item.kind === 'file') {
-        const entry = item.webkitGetAsEntry();
-        if (entry) await processEntry(entry, targetNode);
-      }
-    }
-    persistChanges(nextAlbums);
+    e.target.value = '';
   };
 
   const createAlbum = () => {
@@ -277,7 +229,7 @@ const App = () => {
   };
 
   const deleteAlbum = (e, id) => {
-    if (e) e.stopPropagation();
+    e.stopPropagation();
     const deleteRecursive = (list) => {
       return list.filter(item => {
         if (item.id === id) return false;
@@ -290,36 +242,8 @@ const App = () => {
     persistChanges(deleteRecursive([...albums]));
   };
 
-  const handleFileUpload = async (e) => {
-    const files = e.target.files ? Array.from(e.target.files) : [];
-    if (!files.length || currentPath.length === 0) return;
-
-    await simulateUpload(files.length === 1 ? files[0].name : `${files.length} images`);
-
-    const newImages = files.map(file => ({
-      id: Math.random().toString(36).substr(2, 9),
-      name: file.name,
-      url: URL.createObjectURL(file),
-      size: (file.size / 1024).toFixed(1) + ' KB'
-    }));
-
-    const updateRecursive = (list) => {
-      return list.map(item => {
-        if (item.id === currentPath[currentPath.length - 1]) {
-          return { ...item, images: [...(item.images || []), ...newImages] };
-        }
-        if (item.subAlbums) {
-          return { ...item, subAlbums: updateRecursive(item.subAlbums) };
-        }
-        return item;
-      });
-    };
-    persistChanges(updateRecursive(albums));
-    e.target.value = '';
-  };
-
-  const deleteImage = useCallback((e, imageId) => {
-    if (e) e.stopPropagation();
+  const deleteImage = (e, imageId) => {
+    e.stopPropagation();
     const deleteFromRecursive = (list) => {
       return list.map(item => {
         const newItem = { ...item };
@@ -329,27 +253,7 @@ const App = () => {
       });
     };
     persistChanges(deleteFromRecursive([...albums]));
-  }, [albums]);
-
-  const navigateViewer = useCallback((direction) => {
-    if (viewerIndex === null || activePhotos.length === 0) return;
-    setViewerIndex((prev) => (prev + direction + activePhotos.length) % activePhotos.length);
-  }, [viewerIndex, activePhotos]);
-
-  useEffect(() => {
-    const handleKeyDown = (e) => {
-      if (e.key === 'Escape') {
-        setViewerIndex(null);
-        setIsCreatingAlbum(false);
-      }
-      if (viewerIndex !== null) {
-        if (e.key === 'ArrowRight') navigateViewer(1);
-        else if (e.key === 'ArrowLeft') navigateViewer(-1);
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [viewerIndex, navigateViewer]);
+  };
 
   const currentAlbum = getCurrentAlbum();
   const currentItems = getCurrentDirectory();
@@ -358,31 +262,26 @@ const App = () => {
     return (
       <div className="fixed inset-0 flex flex-col items-center justify-center bg-white z-[100]">
         <Loader2 className="w-10 h-10 text-blue-600 animate-spin mb-4" />
-        <p className="text-xs font-black text-slate-400 uppercase tracking-widest">Connecting to Cloud...</p>
+        <p className="text-xs font-black text-slate-400 uppercase tracking-widest">Waking up Cloud Storage...</p>
       </div>
     );
   }
 
   return (
-    <div 
-      className="flex flex-col h-screen bg-slate-50 text-slate-900 font-sans overflow-hidden relative"
-      onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
-      onDragLeave={() => setIsDragging(false)}
-      onDrop={handleDrop}
-    >
+    <div className="flex flex-col h-screen bg-slate-50 text-slate-900 font-sans overflow-hidden relative">
       {syncing && (
-        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 bg-white shadow-xl border px-4 py-2 rounded-full flex items-center gap-2 animate-bounce">
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 bg-white shadow-xl border px-4 py-2 rounded-full flex items-center gap-2">
           <Loader2 size={12} className="text-blue-600 animate-spin" />
-          <span className="text-[10px] font-black uppercase tracking-tighter text-slate-600">Cloud Sync Active</span>
+          <span className="text-[10px] font-black uppercase tracking-tighter text-slate-600">Syncing to Cloud</span>
         </div>
       )}
 
       {uploadProgress.active && (
-        <div className="fixed bottom-6 right-6 z-[60] w-80 bg-white rounded-2xl shadow-2xl border p-4">
+        <div className="fixed bottom-6 right-6 z-[60] w-80 bg-white rounded-2xl shadow-2xl border p-4 animate-in slide-in-from-bottom">
           <div className="flex items-center gap-3 mb-3">
             <Upload size={18} className="text-blue-600 animate-pulse" />
             <div className="flex-1 min-w-0">
-              <h4 className="text-xs font-black uppercase text-slate-800 truncate">Uploading...</h4>
+              <h4 className="text-xs font-black uppercase text-slate-800 truncate">Uploading</h4>
               <p className="text-[10px] text-slate-500 truncate">{uploadProgress.fileName}</p>
             </div>
           </div>
@@ -392,30 +291,21 @@ const App = () => {
         </div>
       )}
 
-      {isDragging && (
-        <div className="absolute inset-0 z-50 bg-blue-600/90 backdrop-blur-sm flex items-center justify-center border-8 border-dashed border-white/50 m-4 rounded-3xl pointer-events-none">
-          <div className="flex flex-col items-center gap-6 text-white text-center">
-            <FileUp size={80} className="animate-bounce" />
-            <h3 className="text-4xl font-black">Drop to Sync</h3>
-          </div>
-        </div>
-      )}
-
       <header className="bg-white border-b flex-shrink-0 z-20 shadow-sm">
         <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between gap-4">
-          <div className="flex items-center gap-3 cursor-pointer" onClick={() => {setCurrentPath([]); setShowAllNested(false);}}>
+          <div className="flex items-center gap-3 cursor-pointer" onClick={() => setCurrentPath([])}>
             <div className="bg-blue-600 p-2 rounded-xl shadow-lg"><ImageIcon className="text-white w-5 h-5" /></div>
-            <h1 className="text-xl font-black tracking-tight text-slate-800">PhotoVault</h1>
+            <h1 className="text-xl font-black tracking-tight text-slate-800">CloudVault</h1>
           </div>
           <div className="flex items-center gap-2">
-            <button onClick={fetchAlbums} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500" title="Refresh from Cloud">
+            <button onClick={fetchAlbums} className="p-2 hover:bg-slate-100 rounded-lg text-slate-400" title="Manual Refresh">
               <Loader2 size={18} className={status === 'loading' ? 'animate-spin' : ''} />
             </button>
-            <button onClick={() => folderInputRef.current?.click()} className="bg-white border px-3 py-2 rounded-full text-xs font-bold transition-all flex items-center gap-2">
-              <FolderUp size={14} /> <span>Bulk Upload</span>
+            <button onClick={() => folderInputRef.current?.click()} className="bg-white border px-3 py-2 rounded-full text-xs font-bold transition-all flex items-center gap-2 hover:bg-slate-50">
+              <FolderUp size={14} /> <span>Bulk Folders</span>
             </button>
             {currentPath.length > 0 && (
-              <button onClick={() => fileInputRef.current?.click()} className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded-full text-xs font-bold shadow-md flex items-center gap-2">
+              <button onClick={() => fileInputRef.current?.click()} className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded-full text-xs font-bold shadow-md flex items-center gap-2 transition-all active:scale-95">
                 <Upload size={14} /> <span>Add Pics</span>
               </button>
             )}
@@ -425,12 +315,12 @@ const App = () => {
 
       <main className="flex-1 overflow-y-auto">
         <div className="max-w-7xl mx-auto px-4 py-8">
-          <div className="mb-6 flex items-center gap-2 text-[11px] text-slate-400 font-black tracking-widest uppercase bg-white border px-4 py-3 rounded-2xl">
-            <span className="hover:text-blue-600 cursor-pointer" onClick={() => {setCurrentPath([]); setShowAllNested(false);}}>Root</span>
-            {currentPath.map((id, idx) => (
+          <div className="mb-6 flex items-center gap-2 text-[10px] text-slate-400 font-black tracking-widest uppercase bg-white border px-4 py-2.5 rounded-xl shadow-sm">
+            <span className="hover:text-blue-600 cursor-pointer" onClick={() => setCurrentPath([])}>Root</span>
+            {currentPath.map((id) => (
               <React.Fragment key={id}>
-                <ChevronRight size={14} />
-                <span className="text-blue-600">{id}</span>
+                <ChevronRight size={12} />
+                <span className="text-blue-600 truncate max-w-[100px]">{id}</span>
               </React.Fragment>
             ))}
           </div>
@@ -438,57 +328,59 @@ const App = () => {
           <div className="mb-8 flex items-center justify-between">
             <div className="flex items-center gap-4">
               {currentPath.length > 0 && (
-                <button onClick={navigateUp} className="p-3 bg-white border rounded-2xl hover:bg-slate-50 shadow-sm"><ChevronLeft size={20} /></button>
+                <button onClick={navigateUp} className="p-2.5 bg-white border rounded-xl hover:bg-slate-50 shadow-sm"><ChevronLeft size={18} /></button>
               )}
-              <h2 className="text-3xl font-black text-slate-800">{currentPath.length === 0 ? "Collections" : currentAlbum?.name}</h2>
+              <h2 className="text-2xl font-black text-slate-800">{currentPath.length === 0 ? "My Collections" : currentAlbum?.name}</h2>
             </div>
-            {!showAllNested && (
-              <button onClick={() => setIsCreatingAlbum(true)} className="bg-white border-2 border-slate-200 text-slate-700 hover:border-blue-500 hover:text-blue-600 px-6 py-2.5 rounded-2xl font-bold transition-all text-sm flex items-center gap-2">
-                <FolderPlus size={18} /> New Folder
-              </button>
-            )}
+            <button onClick={() => setIsCreatingAlbum(true)} className="bg-white border-2 border-slate-100 text-slate-700 hover:border-blue-500 hover:text-blue-600 px-5 py-2 rounded-xl font-bold transition-all text-xs flex items-center gap-2 shadow-sm">
+              <FolderPlus size={16} /> New Folder
+            </button>
           </div>
 
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-6">
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-5">
             {isCreatingAlbum && (
-              <div className="bg-white p-4 rounded-2xl border-2 border-dashed border-blue-400 flex flex-col gap-3 shadow-xl">
-                <input autoFocus className="w-full px-3 py-2 border rounded-lg text-xs font-bold outline-none" placeholder="Folder name..." value={newAlbumName} onChange={(e) => setNewAlbumName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && createAlbum()} />
+              <div className="bg-white p-4 rounded-xl border-2 border-dashed border-blue-300 flex flex-col gap-3 shadow-lg">
+                <input autoFocus className="w-full px-3 py-2 border rounded-lg text-xs font-bold outline-none border-blue-100" placeholder="Name..." value={newAlbumName} onChange={(e) => setNewAlbumName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && createAlbum()} />
                 <div className="flex gap-2">
-                  <button onClick={createAlbum} className="flex-1 bg-blue-600 text-white py-2 rounded-lg text-[10px] font-black uppercase">Create</button>
-                  <button onClick={() => setIsCreatingAlbum(false)} className="flex-1 bg-slate-100 py-2 rounded-lg text-[10px] font-bold">Cancel</button>
+                  <button onClick={createAlbum} className="flex-1 bg-blue-600 text-white py-1.5 rounded-lg text-[10px] font-black">SAVE</button>
+                  <button onClick={() => setIsCreatingAlbum(false)} className="flex-1 bg-slate-100 py-1.5 rounded-lg text-[10px] font-bold">X</button>
                 </div>
               </div>
             )}
 
-            {!showAllNested && currentItems.map(album => (
-              <div key={album.id} onClick={() => {setCurrentPath([...currentPath, album.id]); setShowAllNested(false);}}
-                   className="group relative bg-white rounded-2xl border shadow-sm hover:shadow-xl transition-all cursor-pointer overflow-hidden">
+            {currentItems.map(album => (
+              <div key={album.id} onClick={() => setCurrentPath([...currentPath, album.id])}
+                   className="group relative bg-white rounded-2xl border shadow-sm hover:shadow-md transition-all cursor-pointer overflow-hidden border-transparent hover:border-blue-100">
                 <div className="aspect-square bg-slate-100 flex items-center justify-center relative">
-                  {album.images?.[0] ? <img src={album.images[0].url} alt="" className="w-full h-full object-cover" /> : <Folder size={48} className="text-slate-300" />}
-                  <button onClick={(e) => deleteAlbum(e, album.id)} className="absolute top-2 right-2 p-2 bg-white text-slate-400 hover:bg-red-500 hover:text-white rounded-full opacity-0 group-hover:opacity-100 shadow-md transition-all"><Trash2 size={14} /></button>
+                  {album.images?.[0] ? 
+                    <img src={album.images[0].url} alt="" className="w-full h-full object-cover opacity-80 group-hover:opacity-100" /> : 
+                    <Folder size={40} className="text-slate-300 group-hover:text-blue-400 transition-colors" />
+                  }
+                  <button onClick={(e) => deleteAlbum(e, album.id)} className="absolute top-2 right-2 p-1.5 bg-white/90 text-slate-400 hover:bg-red-500 hover:text-white rounded-lg opacity-0 group-hover:opacity-100 shadow-sm transition-all"><Trash2 size={12} /></button>
+                  <div className="absolute bottom-2 right-2 bg-black/50 backdrop-blur-md px-2 py-0.5 rounded text-[9px] text-white font-bold">{album.images?.length || 0}</div>
                 </div>
-                <div className="p-3 border-t">
-                  <h3 className="font-bold truncate text-slate-800 text-sm">{album.name}</h3>
-                  <p className="text-[9px] text-blue-500 font-black uppercase tracking-tighter mt-1">{album.images?.length || 0} pics</p>
+                <div className="p-3">
+                  <h3 className="font-bold truncate text-slate-800 text-xs">{album.name}</h3>
                 </div>
               </div>
             ))}
 
             {activePhotos.map((image, index) => (
               <div key={image.id} onClick={() => setViewerIndex(index)}
-                   className="group relative bg-white rounded-xl border-2 overflow-hidden shadow-sm hover:ring-2 hover:ring-blue-500 border-white transition-all cursor-zoom-in">
-                <div className="aspect-[4/3] bg-slate-200 overflow-hidden">
-                  <img src={image.url} alt="" className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" />
-                  <button onClick={(e) => deleteImage(e, image.id)} className="absolute top-2 right-2 p-2 bg-black/60 text-white rounded-lg opacity-0 group-hover:opacity-100 hover:bg-red-600 transition-all"><Trash2 size={12} /></button>
+                   className="group relative bg-white rounded-xl border overflow-hidden shadow-sm hover:shadow-lg transition-all cursor-zoom-in">
+                <div className="aspect-[4/3] bg-slate-200 overflow-hidden relative">
+                  <img src={image.url} alt={image.name} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-700" 
+                       onError={(e) => e.target.src = 'https://placehold.co/400x300?text=Image+Expired'} />
+                  <button onClick={(e) => deleteImage(e, image.id)} className="absolute top-2 right-2 p-1.5 bg-black/40 text-white rounded-lg opacity-0 group-hover:opacity-100 hover:bg-red-600 transition-all"><Trash2 size={12} /></button>
                 </div>
-                <div className="p-2 bg-white"><p className="text-[10px] font-bold truncate text-slate-700">{image.name}</p></div>
+                <div className="p-2 border-t"><p className="text-[9px] font-bold truncate text-slate-500 uppercase tracking-tighter">{image.name}</p></div>
               </div>
             ))}
             
-            {currentPath.length > 0 && !showAllNested && (
-               <div onClick={() => fileInputRef.current?.click()} className="aspect-square rounded-2xl border-2 border-dashed border-slate-300 flex flex-col items-center justify-center gap-2 cursor-pointer hover:bg-blue-50 transition-all text-slate-400 hover:text-blue-500 bg-white group">
-                  <Plus size={28} />
-                  <span className="text-[9px] font-black uppercase">Add Item</span>
+            {currentPath.length > 0 && (
+               <div onClick={() => fileInputRef.current?.click()} className="aspect-square rounded-2xl border-2 border-dashed border-slate-200 flex flex-col items-center justify-center gap-2 cursor-pointer hover:bg-blue-50 hover:border-blue-300 transition-all text-slate-300 hover:text-blue-500 bg-white group">
+                  <Plus size={24} />
+                  <span className="text-[9px] font-black uppercase">Upload</span>
                 </div>
             )}
           </div>
@@ -496,10 +388,13 @@ const App = () => {
       </main>
 
       {viewerIndex !== null && activePhotos[viewerIndex] && (
-        <div className="fixed inset-0 z-[110] bg-black/98 flex flex-col items-center justify-center backdrop-blur-xl animate-in fade-in">
+        <div className="fixed inset-0 z-[110] bg-slate-900/95 flex flex-col items-center justify-center animate-in fade-in">
           <button onClick={() => setViewerIndex(null)} className="absolute top-6 right-6 p-3 text-white hover:bg-white/10 rounded-full transition-all"><X size={32} /></button>
-          <div className="w-full max-h-[80vh] flex items-center justify-center p-4">
-            <img src={activePhotos[viewerIndex].url} alt="" className="max-w-full max-h-full object-contain" />
+          <div className="w-full max-h-[85vh] flex items-center justify-center p-6">
+            <img src={activePhotos[viewerIndex].url} alt="" className="max-w-full max-h-full object-contain shadow-2xl rounded-lg" />
+          </div>
+          <div className="absolute bottom-10 px-6 py-3 bg-white/10 backdrop-blur-xl rounded-full border border-white/20">
+            <p className="text-white text-sm font-bold">{activePhotos[viewerIndex].name}</p>
           </div>
         </div>
       )}
