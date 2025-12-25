@@ -63,23 +63,38 @@ const App = () => {
   const loadData = async () => {
     dispatch({ type: 'FETCH_START' });
     try {
+      // First, try to get the specific resource
       const response = await fetch(`${BASE_URL}/${RESOURCE_ID}`);
-      if (!response.ok) {
-        // If 404, the resource might not exist yet, initialize it
-        if (response.status === 404) {
-          const createResponse = await fetch(BASE_URL, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ id: RESOURCE_ID, data: [] })
-          });
-          if (!createResponse.ok) throw new Error('Could not initialize storage');
-          dispatch({ type: 'FETCH_SUCCESS', payload: [] });
+      
+      if (response.ok) {
+        const result = await response.json();
+        dispatch({ type: 'FETCH_SUCCESS', payload: result.data || [] });
+        return;
+      }
+
+      // If resource not found (404), check if the collection is empty
+      if (response.status === 404) {
+        const checkAll = await fetch(BASE_URL);
+        const allData = await checkAll.json();
+        
+        // If there's already data but ID mismatch, use the first one available
+        if (Array.isArray(allData) && allData.length > 0) {
+          dispatch({ type: 'FETCH_SUCCESS', payload: allData[0].data || [] });
           return;
         }
-        throw new Error('Failed to fetch from MockAPI');
+
+        // If truly empty, initialize the first record
+        const createResponse = await fetch(BASE_URL, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ id: RESOURCE_ID, data: [] })
+        });
+        
+        if (!createResponse.ok) throw new Error('Could not initialize storage on server');
+        dispatch({ type: 'FETCH_SUCCESS', payload: [] });
+      } else {
+        throw new Error(`Server returned ${response.status}: ${response.statusText}`);
       }
-      const result = await response.json();
-      dispatch({ type: 'FETCH_SUCCESS', payload: result.data || [] });
     } catch (err) {
       dispatch({ type: 'FETCH_ERROR', payload: err.message });
     }
@@ -92,6 +107,7 @@ const App = () => {
   const persistToMockAPI = async (newAlbums) => {
     dispatch({ type: 'SYNC_START' });
     try {
+      // We assume RESOURCE_ID exists after successful loadData
       const response = await fetch(`${BASE_URL}/${RESOURCE_ID}`, {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
@@ -100,6 +116,7 @@ const App = () => {
       if (!response.ok) throw new Error('Sync failed');
     } catch (err) {
       console.error("API Sync Error:", err);
+      // Optional: show a small toast/notification instead of full error screen
     } finally {
       dispatch({ type: 'SYNC_END' });
     }
