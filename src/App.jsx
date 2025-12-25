@@ -1,405 +1,589 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { Lightbulb, CheckCircle, Edit, Loader2, RefreshCw, Send, Maximize, Minimize } from 'lucide-react';
+import React, { useState, useRef, useEffect, useCallback, useMemo, useReducer } from 'react';
+import { 
+  Image as ImageIcon, 
+  Trash2, 
+  ChevronLeft, 
+  ChevronRight,
+  Upload, 
+  Folder,
+  Plus,
+  X,
+  FolderPlus,
+  Layers,
+  FolderUp,
+  Loader2,
+  ChevronRightSquare,
+  FileUp
+} from 'lucide-react';
 
-// --- Firebase and Gemini API Setup ---
+// --- API CONFIGURATION ---
+const API_BASE = "https://694d4185ad0f8c8e6e203206.mockapi.io/albums";
 
-// Function to retrieve the API Key. 
-const getApiKey = () => {
-    // 1. Check for Canvas environment injection (if defined)
-    if (typeof __api_key !== 'undefined' && __api_key) {
-        return __api_key;
-    }
-    
-    // 2. Fallback for external environments (e.g., Codespaces, local React).
-    // IMPORTANT: In Codespaces, replace 'YOUR_GEMINI_API_KEY_HERE' with your actual key.
-    const hardcodedKey = 'AIzaSyC9db72ypINrGqHMN6HxfnfkVk1DvRONrI'; 
-    
-    return hardcodedKey !== 'YOUR_GEMINI_API_KEY_HERE' ? hardcodedKey : '';
+// --- STATE MANAGEMENT ---
+const initialState = {
+  items: [],
+  status: 'idle',
+  error: null
 };
 
-const API_KEY = getApiKey();
-const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${API_KEY}`;
-
-// The specific JSON structure we expect from the API
-const RESPONSE_SCHEMA = {
-  type: "OBJECT",
-  properties: {
-    processedTextHtml: {
-      type: "STRING",
-      description: "The original text with all errors wrapped in <span class='text-red-600 font-semibold cursor-pointer' data-error-id='X'>...</span> where X is a unique number."
-    },
-    suggestedImprovements: {
-      type: "ARRAY",
-      items: {
-        type: "OBJECT",
-        properties: {
-          errorId: { type: "NUMBER", description: "The unique ID (X) matching the data-error-id in processedTextHtml." },
-          original: { type: "STRING", description: "The original incorrect word or phrase." },
-          correction: { type: "STRING", description: "The suggested correction/improvement." }
-        },
-        propertyOrdering: ["errorId", "original", "correction"]
-      }
-    }, // <-- CORRECTED: Added comma here
-    headlines: { // <-- CORRECTED: Moved inside 'properties'
-      type: "ARRAY",
-      items: {
-        type: "OBJECT",
-        properties: {
-          headline: { type: "STRING", description: "A catchy news headline in Hindi." },
-          subheadline: { type: "STRING", description: "A summarizing subheadline in Hindi." }
-        },
-        propertyOrdering: ["headline", "subheadline"]
-      }
-    }
-  }, // <-- CORRECTED: This closes the main 'properties' block
-  propertyOrdering: ["processedTextHtml", "suggestedImprovements", "headlines"] // <-- CORRECTED: This is correct placement
-};
-
-
-// --- Helper Functions ---
-
-const exponentialBackoffFetch = async (url, options, maxRetries = 5) => {
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
-    try {
-      const response = await fetch(url, options);
-      if (response.status !== 429) { // Not a rate limit error
-        return response;
-      }
-      // Log for debugging (but not in production console)
-      // console.warn(`Rate limit hit. Retrying in ${2 ** attempt}s...`);
-      await new Promise(resolve => setTimeout(resolve, 1000 * 2 ** attempt));
-    } catch (error) {
-      // console.error(`Fetch attempt ${attempt + 1} failed:`, error);
-      if (attempt === maxRetries - 1) throw error;
-      await new Promise(resolve => setTimeout(resolve, 1000 * 2 ** attempt));
-    }
+function albumReducer(state, action) {
+  switch (action.type) {
+    case 'FETCH_START':
+      return { ...state, status: 'loading' };
+    case 'FETCH_SUCCESS':
+      return { ...state, status: 'succeeded', items: action.payload };
+    case 'FETCH_ERROR':
+      return { ...state, status: 'failed', error: action.payload };
+    case 'SET_ITEMS':
+      return { ...state, items: action.payload };
+    default:
+      return state;
   }
-  throw new Error("API call failed after multiple retries.");
-};
-
-
-// --- Main Component ---
+}
 
 const App = () => {
-  const [inputText, setInputText] = useState('');
-  const [analyzedContent, setAnalyzedContent] = useState(null);
-  const [isLoading, setIsLoading] = useState(false);
-  const [headlineCount, setHeadlineCount] = useState(10);
-  const [selectedError, setSelectedError] = useState(null); // The error object being viewed
-  const [isFullScreen, setIsFullScreen] = useState(false);
-
-  // Set the default error suggestion to the first one available, only once after content is loaded
-  useEffect(() => {
-    if (analyzedContent && analyzedContent.suggestedImprovements.length > 0 && !selectedError) {
-      setSelectedError(analyzedContent.suggestedImprovements[0]);
-    } else if (analyzedContent && analyzedContent.suggestedImprovements.length === 0) {
-      setSelectedError(null);
-    }
-    // Note: Do not include selectedError in deps, otherwise it resets after every click
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [analyzedContent]);
-
-  // Handler for clicking on a highlighted error in the text box
-  const handleErrorClick = useCallback((event) => {
-    const target = event.target;
-    if (target.classList.contains('cursor-pointer') && target.dataset.errorId) {
-      const errorId = parseInt(target.dataset.errorId, 10);
-      const error = analyzedContent.suggestedImprovements.find(imp => imp.errorId === errorId);
-      if (error) {
-        setSelectedError(error);
-        // Optional: Scroll the highlighted suggestion into view
-        document.getElementById(`error-${error.errorId}`)?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-      }
-    }
-  }, [analyzedContent]);
-
-  // Main function to call the Gemini API
-  const handleTextAnalysis = useCallback(async (refreshHeadlines = false) => {
-    if (!inputText.trim()) {
-      alert("Please paste the article text or upload an image first.");
-      return;
-    }
-    
-    // API Key Validation Check (We now rely on the fetch error for debugging if key is bad)
-    if (!API_KEY) {
-        alert("The Gemini API Key is missing. Please provide a valid key.");
-        setIsLoading(false);
-        return;
-    }
-
-    setIsLoading(true);
-    let tempContent = analyzedContent;
-    
-    // If we're just refreshing headlines, keep existing processed text and suggestions
-    if (refreshHeadlines && analyzedContent) {
-      tempContent = {
-        ...analyzedContent,
-        headlines: [] // Clear headlines to refresh
-      };
-      setAnalyzedContent(tempContent); // Update UI to show loading for headlines only
-    } else {
-        setAnalyzedContent(null);
-        tempContent = null;
-        setSelectedError(null); // Clear selected error for new analysis
-    }
-
-    // Determine the user query and system prompt based on whether we are refreshing
-    const userQuery = `Analyze the following news article text. ${tempContent ? 'ONLY generate new headlines.' : 'Detect and highlight grammatical, spelling, and stylistic errors. Highlight errors using the HTML tag <span class="text-red-600 font-semibold cursor-pointer" data-error-id="X">...</span> where X is a unique number (starting from 1) for each error. I need to know the original error word/phrase, its corresponding correction, and also generate a list of'} ${headlineCount} headline and subheadline pairs in Hindi, prioritizing high-impact journalistic tone. ${tempContent ? 'The text for analysis is the same as before.' : 'The text is:'}\n\n${inputText}`;
-
-    const systemInstruction = {
-        parts: [{ text: "You are a world-class professional news editor and language specialist. Your task is to analyze the provided article text, detect errors, and generate compelling, high-impact headlines and subheadlines in Hindi based on the article's content. Output must be a single, strictly valid JSON object adhering to the provided schema. Do not include any introductory or concluding text outside the JSON." }]
-    };
-
-    const payload = {
-      contents: [{ parts: [{ text: userQuery }] }],
-      generationConfig: {
-        responseMimeType: "application/json",
-        responseSchema: RESPONSE_SCHEMA
-      },
-      systemInstruction: systemInstruction,
-    };
-
-    let rawResponse = null;
-    let responseStatus = 0;
-
-    try {
-      const options = {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      };
-
-      const response = await exponentialBackoffFetch(GEMINI_API_URL, options);
-      responseStatus = response.status;
-      rawResponse = await response.text(); // Read raw text for logging
-
-      if (!response.ok) {
-        // Handle HTTP errors (400, 401, 403, 500 etc.)
-        console.error("API HTTP Error:", responseStatus);
-        console.error("Raw Response Text:", rawResponse);
-        throw new Error(`API call failed with status ${responseStatus}.`);
-      }
-
-      const result = JSON.parse(rawResponse); // Parse the text into JSON object
-      
-      const jsonString = result?.candidates?.[0]?.content?.parts?.[0]?.text;
-
-      if (!jsonString) {
-        console.error("API response content is empty or malformed.");
-        console.error("Full Parsed Result:", result);
-        throw new Error("API response was empty or malformed.");
-      }
-
-      const parsedJson = JSON.parse(jsonString); // Parse the internal JSON string
-
-      if (refreshHeadlines && tempContent) {
-        // Only update the headlines array
-        setAnalyzedContent(prev => ({
-          ...prev,
-          headlines: parsedJson.headlines
-        }));
-      } else {
-        // Full update
-        setAnalyzedContent(parsedJson);
-      }
-      
-    } catch (error) {
-      console.error("--- DEBUGGING API FAILURE ---");
-      console.error("Error during Gemini API call:", error);
-      console.error("Response Status (if known):", responseStatus);
-      console.error("Raw Response Text (if available):", rawResponse);
-      console.error("-----------------------------");
-      alert("Failed to analyze text. Please check the console for details and share the debug log.");
-    } finally {
-      setIsLoading(false);
-    }
-  }, [inputText, headlineCount, analyzedContent]);
-
-
-  // Placeholder for OCR/Image Upload functionality
-  const handleImageUpload = () => {
-    alert("Image upload and OCR functionality is a planned feature. For now, please paste the text directly into the box.");
-  };
+  const [state, dispatch] = useReducer(albumReducer, initialState);
+  const { items: albums, status } = state;
   
-  // Toggle full screen mode for better typing experience
-  const toggleFullScreen = () => {
-    setIsFullScreen(!isFullScreen);
+  const [currentPath, setCurrentPath] = useState([]); 
+  const [isCreatingAlbum, setIsCreatingAlbum] = useState(false);
+  const [newAlbumName, setNewAlbumName] = useState('');
+  const [viewerIndex, setViewerIndex] = useState(null); 
+  const [showAllNested, setShowAllNested] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
+  
+  const fileInputRef = useRef(null);
+  const folderInputRef = useRef(null);
+
+  // API Actions
+  const fetchAlbums = async () => {
+    dispatch({ type: 'FETCH_START' });
+    try {
+      const response = await fetch(API_BASE);
+      const data = await response.json();
+      const remoteData = data.find(item => item.id === "1")?.data;
+      dispatch({ type: 'FETCH_SUCCESS', payload: remoteData || [] });
+    } catch (err) {
+      dispatch({ type: 'FETCH_ERROR', payload: err.message });
+    }
   };
 
-  const appContainerClasses = isFullScreen 
-    ? "fixed inset-0 z-50 p-4 bg-gray-50 overflow-auto transition-all duration-300"
-    : "max-w-7xl mx-auto p-4 transition-all duration-300";
+  const syncAlbums = async (newAlbums) => {
+    try {
+      const response = await fetch(`${API_BASE}/1`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ data: newAlbums })
+      });
+      if (!response.ok) {
+        await fetch(API_BASE, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: "1", data: newAlbums })
+        });
+      }
+    } catch (err) {
+      console.error("Sync failed", err);
+    }
+  };
+
+  const persistChanges = (newAlbums) => {
+    dispatch({ type: 'SET_ITEMS', payload: newAlbums });
+    syncAlbums(newAlbums);
+  };
+
+  useEffect(() => {
+    fetchAlbums();
+  }, []);
+
+  // Navigation helpers
+  const getCurrentDirectory = useCallback(() => {
+    let current = albums;
+    for (const id of currentPath) {
+      const folder = current.find(a => a.id === id);
+      if (folder) current = folder.subAlbums || [];
+    }
+    return current;
+  }, [albums, currentPath]);
+
+  const getCurrentAlbum = useCallback(() => {
+    if (currentPath.length === 0) return null;
+    let current = null;
+    let list = albums;
+    for (const id of currentPath) {
+      current = list.find(a => a.id === id);
+      list = current?.subAlbums || [];
+    }
+    return current;
+  }, [albums, currentPath]);
+
+  const getAllPhotosRecursive = useCallback((album, pathName = "") => {
+    const currentName = pathName ? `${pathName} / ${album.name}` : album.name;
+    let photos = (album.images || []).map(img => ({ ...img, folderName: currentName }));
+    if (album.subAlbums) {
+      album.subAlbums.forEach(sub => {
+        photos = [...photos, ...getAllPhotosRecursive(sub, currentName)];
+      });
+    }
+    return photos;
+  }, []);
+
+  const activePhotos = useMemo(() => {
+    const album = getCurrentAlbum();
+    if (!album) return [];
+    return showAllNested ? getAllPhotosRecursive(album) : (album.images || []);
+  }, [getCurrentAlbum, showAllNested, getAllPhotosRecursive]);
+
+  const navigateUp = () => {
+    setCurrentPath(prev => prev.slice(0, -1));
+    setShowAllNested(false);
+  };
+
+  // --- RECURSIVE FOLDER PROCESSING FOR DRAG & DROP ---
+  const processEntry = async (entry, targetList) => {
+    if (entry.isFile) {
+      const file = await new Promise((resolve) => entry.file(resolve));
+      if (file.type.startsWith('image/')) {
+        targetList.images.push({
+          id: Math.random().toString(36).substr(2, 9),
+          name: file.name,
+          url: URL.createObjectURL(file),
+          size: (file.size / 1024).toFixed(1) + ' KB'
+        });
+      }
+    } else if (entry.isDirectory) {
+      let folder = targetList.subAlbums.find(f => f.name === entry.name);
+      if (!folder) {
+        folder = { id: Math.random().toString(36).substr(2, 9), name: entry.name, images: [], subAlbums: [] };
+        targetList.subAlbums.push(folder);
+      }
+      
+      const dirReader = entry.createReader();
+      const entries = await new Promise((resolve) => dirReader.readEntries(resolve));
+      for (const childEntry of entries) {
+        await processEntry(childEntry, folder);
+      }
+    }
+  };
+
+  const handleDrop = async (e) => {
+    e.preventDefault();
+    setIsDragging(false);
+    
+    const items = e.dataTransfer.items;
+    if (!items) return;
+
+    const nextAlbums = JSON.parse(JSON.stringify(albums));
+    let targetNode = { subAlbums: nextAlbums, images: [] }; // Mock root node
+
+    // If we are inside a folder, find the actual target node in the tree
+    if (currentPath.length > 0) {
+      let current = nextAlbums;
+      let found = null;
+      for (const id of currentPath) {
+        found = current.find(a => a.id === id);
+        if (found) current = found.subAlbums;
+      }
+      if (found) targetNode = found;
+    }
+
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.kind === 'file') {
+        const entry = item.webkitGetAsEntry();
+        if (entry) {
+          await processEntry(entry, targetNode);
+        }
+      }
+    }
+
+    persistChanges(nextAlbums);
+  };
+
+  const createAlbum = () => {
+    if (!newAlbumName.trim()) return;
+    const newAlbum = {
+      id: Math.random().toString(36).substr(2, 9),
+      name: newAlbumName,
+      images: [],
+      subAlbums: []
+    };
+
+    let nextAlbums;
+    if (currentPath.length === 0) {
+      nextAlbums = [...albums, newAlbum];
+    } else {
+      const updateRecursive = (list) => {
+        return list.map(item => {
+          if (item.id === currentPath[currentPath.length - 1]) {
+            return { ...item, subAlbums: [...(item.subAlbums || []), newAlbum] };
+          }
+          if (item.subAlbums) {
+            return { ...item, subAlbums: updateRecursive(item.subAlbums) };
+          }
+          return item;
+        });
+      };
+      nextAlbums = updateRecursive(albums);
+    }
+    persistChanges(nextAlbums);
+    setNewAlbumName('');
+    setIsCreatingAlbum(false);
+  };
+
+  const deleteAlbum = (e, id) => {
+    if (e) e.stopPropagation();
+    const deleteRecursive = (list) => {
+      return list.filter(item => {
+        if (item.id === id) return false;
+        if (item.subAlbums) {
+          item.subAlbums = deleteRecursive(item.subAlbums);
+        }
+        return true;
+      });
+    };
+    persistChanges(deleteRecursive([...albums]));
+  };
+
+  const handleFileUpload = (e) => {
+    const files = e.target.files ? Array.from(e.target.files) : [];
+    if (!files.length || currentPath.length === 0) return;
+
+    const newImages = files.map(file => ({
+      id: Math.random().toString(36).substr(2, 9),
+      name: file.name,
+      url: URL.createObjectURL(file),
+      size: (file.size / 1024).toFixed(1) + ' KB'
+    }));
+
+    const updateRecursive = (list) => {
+      return list.map(item => {
+        if (item.id === currentPath[currentPath.length - 1]) {
+          return { ...item, images: [...(item.images || []), ...newImages] };
+        }
+        if (item.subAlbums) {
+          return { ...item, subAlbums: updateRecursive(item.subAlbums) };
+        }
+        return item;
+      });
+    };
+    persistChanges(updateRecursive(albums));
+    e.target.value = '';
+  };
+
+  const deleteImage = useCallback((e, imageId) => {
+    if (e) e.stopPropagation();
+    const deleteFromRecursive = (list) => {
+      return list.map(item => {
+        const newItem = { ...item };
+        if (newItem.images) newItem.images = newItem.images.filter(img => img.id !== imageId);
+        if (newItem.subAlbums) newItem.subAlbums = deleteFromRecursive(newItem.subAlbums);
+        return newItem;
+      });
+    };
+    persistChanges(deleteFromRecursive([...albums]));
+  }, [albums]);
+
+  const navigateViewer = useCallback((direction) => {
+    if (viewerIndex === null || activePhotos.length === 0) return;
+    setViewerIndex((prev) => (prev + direction + activePhotos.length) % activePhotos.length);
+  }, [viewerIndex, activePhotos]);
+
+  // --- KEYBOARD CONTROLS ---
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        if (viewerIndex !== null) {
+          setViewerIndex(null);
+        } else if (isCreatingAlbum) {
+          setIsCreatingAlbum(false);
+          setNewAlbumName('');
+        }
+      }
+
+      if (viewerIndex !== null) {
+        if (e.key === 'ArrowRight') {
+          navigateViewer(1);
+        } else if (e.key === 'ArrowLeft') {
+          navigateViewer(-1);
+        } else if (e.key === 'Delete' || e.key === 'Backspace') {
+          const currentImageId = activePhotos[viewerIndex]?.id;
+          if (currentImageId) {
+            deleteImage(null, currentImageId);
+            if (activePhotos.length <= 1) {
+              setViewerIndex(null);
+            }
+          }
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [viewerIndex, isCreatingAlbum, activePhotos, navigateViewer, deleteImage]);
+
+  const currentAlbum = getCurrentAlbum();
+  const currentItems = getCurrentDirectory();
+
+  if (status === 'loading' && albums.length === 0) {
+    return (
+      <div className="fixed inset-0 flex items-center justify-center bg-slate-50">
+        <Loader2 className="w-8 h-8 text-blue-600 animate-spin" />
+      </div>
+    );
+  }
 
   return (
-    <div className={appContainerClasses}>
-      <h1 className="text-3xl font-extrabold text-blue-800 mb-6 border-b-2 pb-2">
-        <Edit className="inline-block mr-2 h-7 w-7"/> Reporter's Editorial Assistant
-      </h1>
-      <p className="text-gray-600 mb-6">
-        Paste your article or select a file to detect errors, get suggestions, and generate compelling Hindi headlines.
-      </p>
-
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        
-        {/* --- LEFT COLUMN: Input and Error Detection --- */}
-        <div className={`col-span-1 lg:col-span-2 ${isFullScreen ? 'h-full flex flex-col' : ''}`}>
-          <div className="mb-6 bg-white p-6 rounded-xl shadow-lg border border-gray-200 flex-1">
-            <div className="flex justify-between items-center mb-4">
-                <h2 className="text-xl font-semibold text-gray-700 flex items-center">
-                  <Maximize className="mr-2 h-5 w-5 text-blue-500" onClick={toggleFullScreen} />
-                  Article Input & Analysis
-                </h2>
-                <button
-                    onClick={toggleFullScreen}
-                    className="p-2 text-sm text-gray-500 hover:text-blue-500 transition-colors"
-                    aria-label={isFullScreen ? "Exit full screen" : "Enter full screen"}
-                >
-                    {isFullScreen ? <Minimize className="h-5 w-5" /> : <Maximize className="h-5 w-5" />}
-                </button>
+    <div 
+      className="flex flex-col h-screen bg-slate-50 text-slate-900 font-sans overflow-hidden relative"
+      onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+      onDragLeave={() => setIsDragging(false)}
+      onDrop={handleDrop}
+    >
+      {/* Global Drag Overlay */}
+      {isDragging && (
+        <div className="absolute inset-0 z-50 bg-blue-600/90 backdrop-blur-sm flex items-center justify-center border-8 border-dashed border-white/50 m-4 rounded-3xl pointer-events-none animate-in zoom-in duration-200">
+          <div className="flex flex-col items-center gap-6 text-white text-center">
+            <div className="bg-white/20 p-8 rounded-full">
+              <FileUp size={80} className="animate-bounce" />
             </div>
-            
-            {/* Input Text Area */}
-            <textarea
-              value={inputText}
-              onChange={(e) => setInputText(e.target.value)}
-              placeholder="Paste your news article text here..."
-              rows={isFullScreen ? 20 : 10}
-              className={`w-full p-3 mb-4 border-2 border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 transition-shadow resize-none ${isFullScreen ? 'flex-1' : ''}`}
-            />
-            
-            {/* Action Buttons */}
-            <div className="flex gap-4">
-              <button
-                onClick={() => handleTextAnalysis(false)}
-                disabled={isLoading}
-                className="flex items-center justify-center px-6 py-2 bg-blue-600 text-white font-medium rounded-lg shadow-md hover:bg-blue-700 transition-colors disabled:bg-blue-300"
-              >
-                {isLoading && !analyzedContent ? <Loader2 className="mr-2 h-5 w-5 animate-spin" /> : <Send className="mr-2 h-5 w-5" />}
-                {isLoading && !analyzedContent ? 'Analyzing...' : 'Analyze Text'}
-              </button>
-              <button
-                onClick={handleImageUpload}
-                className="flex items-center justify-center px-6 py-2 border border-blue-600 text-blue-600 font-medium rounded-lg shadow-md hover:bg-blue-50 transition-colors"
-              >
-                Upload Image (OCR)
-              </button>
-            </div>
-
-            {/* Error Detection Box (Output 1) */}
-            <div className="mt-8">
-              <h3 className="text-lg font-semibold text-gray-700 mb-3 flex items-center">
-                <CheckCircle className="mr-2 h-5 w-5 text-green-500" /> Error-Checked Text (Click Red Text to Highlight Suggestion)
-              </h3>
-              <div 
-                className="min-h-[150px] p-4 bg-gray-50 border border-red-300 rounded-lg text-gray-800 leading-relaxed"
-                dangerouslySetInnerHTML={{ __html: analyzedContent?.processedTextHtml || 'Analysis results will appear here. Errors will be highlighted in red.' }}
-                onClick={handleErrorClick}
-              />
+            <div className="space-y-2">
+              <h3 className="text-4xl font-black">Drop to Upload</h3>
+              <p className="text-xl font-medium opacity-80">Folders and subfolders will be reconstructed automatically</p>
             </div>
           </div>
         </div>
+      )}
 
-        {/* --- RIGHT COLUMN: Suggestions and Headlines --- */}
-        <div className="col-span-1">
-            
-          {/* Suggested Improvement Box (Output 2) - Now shows ALL suggestions */}
-          <div className="mb-6 bg-white p-6 rounded-xl shadow-lg border border-gray-200">
-            <h2 className="text-xl font-semibold text-gray-700 mb-3 flex items-center">
-              <Lightbulb className="mr-2 h-5 w-5 text-yellow-500" /> All Detected Errors & Suggestions
-            </h2>
-            
-            {analyzedContent?.suggestedImprovements?.length > 0 ? (
-              <div className="max-h-96 overflow-y-auto space-y-2">
-                {analyzedContent.suggestedImprovements.map((item) => (
-                  <div 
-                    key={item.errorId}
-                    id={`error-${item.errorId}`} // ID for smooth scrolling
-                    className={`p-3 rounded-lg border cursor-pointer transition-all duration-300 ${
-                      selectedError?.errorId === item.errorId 
-                        ? 'bg-yellow-100 border-yellow-500 shadow-md transform scale-[1.01]' 
-                        : 'bg-white hover:bg-gray-50 border-gray-300'
-                    }`}
-                    onClick={() => setSelectedError(item)}
-                  >
-                    <p className="font-medium text-sm text-gray-800 flex justify-between items-center">
-                      <span>Error {item.errorId}:</span> 
-                      <span className="text-red-600 font-semibold">{item.original}</span>
-                    </p>
-                    <p className="text-xs text-gray-600 mt-1 flex justify-between items-start">
-                      <span>Correction:</span>
-                      <span className="text-green-600 font-medium ml-4 text-right">{item.correction}</span>
-                    </p>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className='text-gray-500 italic min-h-[100px]'>
-                {isLoading ? "Analyzing text for errors..." : "Suggestions will appear here after analysis."}
-              </p>
+      <header className="bg-white border-b flex-shrink-0 z-20 shadow-sm">
+        <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3 cursor-pointer min-w-fit" onClick={() => {setCurrentPath([]); setShowAllNested(false);}}>
+            <div className="bg-blue-600 p-2 rounded-xl shadow-lg shadow-blue-200">
+              <ImageIcon className="text-white w-5 h-5" />
+            </div>
+            <h1 className="text-xl font-black tracking-tight text-slate-800">PhotoVault</h1>
+          </div>
+          
+          <div className="flex items-center gap-2 overflow-x-auto no-scrollbar py-1">
+            <button 
+              onClick={() => folderInputRef.current?.click()}
+              className="bg-white border text-slate-600 hover:text-blue-600 px-3 py-2 rounded-full text-xs font-bold transition-all flex items-center gap-2 flex-shrink-0"
+            >
+              <FolderUp size={14} />
+              <span>Bulk Upload</span>
+            </button>
+
+            {currentPath.length > 0 && (
+              <>
+                <button 
+                  onClick={() => setShowAllNested(!showAllNested)}
+                  className={`px-3 py-2 rounded-full text-xs font-bold transition-all flex items-center gap-2 flex-shrink-0 ${
+                    showAllNested ? 'bg-blue-100 text-blue-700 ring-2 ring-blue-500' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                  }`}
+                >
+                  <Layers size={14} />
+                  <span>{showAllNested ? 'Deep View' : 'Folder View'}</span>
+                </button>
+                <button 
+                  onClick={() => fileInputRef.current?.click()}
+                  className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded-full text-xs font-bold shadow-md flex items-center gap-2 flex-shrink-0"
+                >
+                  <Upload size={14} />
+                  <span>Add Pics</span>
+                </button>
+              </>
             )}
-            <p className="text-xs text-gray-500 mt-4 border-t pt-2">
-              *The AI currently returns only the specific incorrect word/phrase and its correction.
-            </p>
+          </div>
+        </div>
+      </header>
+
+      <main className="flex-1 overflow-y-auto overflow-x-hidden">
+        <div className="max-w-7xl mx-auto px-4 py-8">
+          <div className="mb-6 flex items-center gap-2 text-[11px] text-slate-400 font-black tracking-widest uppercase overflow-x-auto no-scrollbar whitespace-nowrap bg-white border px-4 py-3 rounded-2xl shadow-sm">
+            <span className="hover:text-blue-600 cursor-pointer flex-shrink-0" onClick={() => {setCurrentPath([]); setShowAllNested(false);}}>Root</span>
+            {currentPath.map((id, idx) => {
+               let list = albums;
+               for (let i = 0; i < idx; i++) list = list.find(a => a.id === currentPath[i])?.subAlbums || [];
+               const folder = list.find(a => a.id === id);
+               return (
+                 <React.Fragment key={id}>
+                   <ChevronRight size={14} className="flex-shrink-0 text-slate-300" />
+                   <span className={`cursor-pointer hover:text-blue-600 flex-shrink-0 ${idx === currentPath.length - 1 ? 'text-blue-600' : ''}`}
+                         onClick={() => {setCurrentPath(currentPath.slice(0, idx+1)); setShowAllNested(false);}}>
+                     {folder?.name}
+                   </span>
+                 </React.Fragment>
+               );
+            })}
           </div>
 
-          {/* Headline Generation Box (Output 3) */}
-          <div className="bg-white p-6 rounded-xl shadow-lg border border-gray-200">
-            <h2 className="text-xl font-semibold text-gray-700 mb-3 flex items-center">
-              <Lightbulb className="mr-2 h-5 w-5 text-purple-500" /> Hindi Headlines & Subheadlines
-            </h2>
-            
-            {/* Headline Count Selector and Refresh Button */}
-            <div className="flex justify-between items-center mb-4">
-              <label htmlFor="headline-count" className="text-sm text-gray-600">
-                Number of Headlines (5-25):
-              </label>
-              <div className="flex items-center gap-2">
-                <select
-                  id="headline-count"
-                  value={headlineCount}
-                  onChange={(e) => setHeadlineCount(parseInt(e.target.value))}
-                  className="p-1 border border-gray-300 rounded-md text-sm"
-                  disabled={isLoading}
-                >
-                  {Array.from({ length: 21 }, (_, i) => i + 5).map(num => (
-                    <option key={num} value={num}>{num}</option>
-                  ))}
-                </select>
-                <button
-                  onClick={() => handleTextAnalysis(true)}
-                  disabled={isLoading || !analyzedContent}
-                  className="p-2 bg-purple-100 text-purple-600 rounded-full hover:bg-purple-200 transition-colors disabled:opacity-50"
-                  title="Refresh Headlines"
-                >
-                  <RefreshCw className={`h-4 w-4 ${isLoading && analyzedContent ? 'animate-spin' : ''}`} />
+          <div className="mb-8 flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div className="flex items-center gap-4">
+              {currentPath.length > 0 && (
+                <button onClick={navigateUp} className="p-3 bg-white border rounded-2xl hover:bg-slate-50 transition-colors shadow-sm">
+                  <ChevronLeft size={20} />
                 </button>
+              )}
+              <div>
+                <h2 className="text-3xl font-black text-slate-800 tracking-tight flex items-center gap-3">
+                  {currentPath.length === 0 ? "Collections" : currentAlbum?.name}
+                  {currentPath.length > 1 && <span className="text-slate-200 font-light text-xl">/</span>}
+                  <span className="text-slate-300 text-lg font-medium">
+                    {currentPath.length > 1 ? albums.find(a => a.id === currentPath[0])?.name : ""}
+                  </span>
+                </h2>
+                <p className="text-slate-400 text-[10px] font-black tracking-[0.2em] mt-1 uppercase">
+                  {showAllNested ? `${activePhotos.length} Total Items in Tree` : `${currentItems.length} Folders • ${(currentAlbum?.images || []).length} Photos`}
+                </p>
               </div>
             </div>
+            
+            {!showAllNested && (
+              <button 
+                onClick={() => setIsCreatingAlbum(true)}
+                className="bg-white border-2 border-slate-200 text-slate-700 hover:border-blue-500 hover:text-blue-600 px-6 py-2.5 rounded-2xl font-bold transition-all flex items-center gap-2 shadow-sm text-sm"
+              >
+                <FolderPlus size={18} /> New Folder
+              </button>
+            )}
+          </div>
 
-            {/* Headlines List */}
-            <div className="max-h-96 overflow-y-auto space-y-4">
-              {isLoading && analyzedContent && analyzedContent.headlines.length === 0 ? (
-                <div className="flex justify-center items-center h-20">
-                    <Loader2 className="h-8 w-8 text-purple-500 animate-spin" />
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 sm:gap-6">
+            {isCreatingAlbum && (
+              <div className="bg-white p-4 rounded-2xl border-2 border-dashed border-blue-400 flex flex-col gap-3 shadow-xl ring-4 ring-blue-50">
+                <input 
+                  autoFocus
+                  className="w-full px-3 py-2 border rounded-lg outline-none focus:ring-2 focus:ring-blue-500 text-xs font-bold"
+                  placeholder="Folder name..."
+                  value={newAlbumName}
+                  onChange={(e) => setNewAlbumName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') createAlbum();
+                  }}
+                />
+                <div className="flex gap-2">
+                  <button onClick={createAlbum} className="flex-1 bg-blue-600 text-white py-2 rounded-lg text-[10px] font-black uppercase">Create</button>
+                  <button onClick={() => {setIsCreatingAlbum(false); setNewAlbumName('');}} className="flex-1 bg-slate-100 py-2 rounded-lg text-[10px] font-bold">Cancel</button>
                 </div>
-              ) : (analyzedContent?.headlines?.length > 0 ? (
-                analyzedContent.headlines.map((item, index) => (
-                  <div key={index} className="border-l-4 border-purple-500 pl-3 py-1 bg-purple-50 rounded-r-md shadow-sm">
-                    <p className="font-bold text-base text-purple-800">
-                      {index + 1}. {item.headline}
-                    </p>
-                    <p className="text-sm text-purple-600 italic mt-0.5">
-                      {item.subheadline}
+              </div>
+            )}
+
+            {!showAllNested && currentItems.map(album => (
+              <div key={album.id} onClick={() => {setCurrentPath([...currentPath, album.id]); setShowAllNested(false);}}
+                   className="group relative bg-white rounded-2xl border shadow-sm hover:shadow-xl transition-all cursor-pointer overflow-hidden border-slate-200">
+                <div className="aspect-square bg-slate-100 flex items-center justify-center relative overflow-hidden">
+                  {album.images?.[0] ? (
+                    <img src={album.images[0].url} alt="" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
+                  ) : (
+                    <div className="flex flex-col items-center gap-2 opacity-30">
+                      <Folder size={48} className="text-slate-400" />
+                    </div>
+                  )}
+                  <div className="absolute inset-x-0 bottom-0 p-2 bg-gradient-to-t from-black/60 to-transparent opacity-0 group-hover:opacity-100 transition-opacity">
+                    <p className="text-[9px] text-white font-black uppercase tracking-widest flex items-center gap-1">
+                      <ChevronRightSquare size={10} /> Open Folder
                     </p>
                   </div>
-                ))
-              ) : (
-                <p className='text-gray-500 italic'>Headlines will appear here after analysis.</p>
+                  <button onClick={(e) => deleteAlbum(e, album.id)}
+                          className="absolute top-2 right-2 p-2 bg-white/90 text-slate-400 hover:bg-red-500 hover:text-white rounded-full opacity-0 group-hover:opacity-100 transition-all shadow-md">
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+                <div className="p-3 border-t bg-white">
+                  <div className="flex justify-between items-start gap-2">
+                    <h3 className="font-bold truncate text-slate-800 text-sm">{album.name}</h3>
+                  </div>
+                  <div className="flex items-center gap-2 mt-1">
+                    <span className="text-[9px] text-blue-500 font-black uppercase tracking-tighter">
+                      {album.images?.length || 0} pics
+                    </span>
+                    <span className="text-[9px] text-slate-300 font-black">•</span>
+                    <span className="text-[9px] text-slate-400 font-black uppercase tracking-tighter">
+                      {album.subAlbums?.length || 0} folders
+                    </span>
+                  </div>
+                </div>
+              </div>
+            ))}
+
+            {activePhotos.map((image, index) => (
+              <div key={image.id} onClick={() => setViewerIndex(index)}
+                   className="group relative bg-white rounded-xl border-2 overflow-hidden shadow-sm hover:ring-2 hover:ring-blue-500 border-white transition-all cursor-zoom-in">
+                <div className="aspect-[4/3] relative overflow-hidden bg-slate-200">
+                  <img src={image.url} alt="" className="w-full h-full object-cover transition-transform group-hover:scale-110 duration-700" />
+                  <button onClick={(e) => deleteImage(e, image.id)}
+                          className="absolute top-2 right-2 p-2 bg-black/60 text-white rounded-lg opacity-0 group-hover:opacity-100 hover:bg-red-600 transition-all z-10 backdrop-blur-md">
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+                <div className="p-2 bg-white">
+                  <p className="text-[10px] font-bold truncate text-slate-700 leading-tight">{image.name}</p>
+                  {showAllNested && (
+                    <div className="flex items-center gap-1 mt-1 opacity-60">
+                      <Folder size={8} className="text-blue-500" />
+                      <p className="text-[8px] text-blue-500 uppercase font-black truncate">{image.folderName}</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+            
+            {currentPath.length > 0 && !showAllNested && (
+               <div onClick={() => fileInputRef.current?.click()}
+                    className="aspect-square rounded-2xl border-2 border-dashed border-slate-300 flex flex-col items-center justify-center gap-2 cursor-pointer hover:bg-blue-50 transition-all text-slate-400 hover:text-blue-500 bg-white group hover:border-blue-300">
+                  <Plus size={28} className="group-hover:scale-110 transition-transform" />
+                  <span className="text-[9px] font-black uppercase tracking-widest">Add Item</span>
+                </div>
+            )}
+          </div>
+          
+          <div className="h-20" />
+        </div>
+      </main>
+
+      {/* Viewer Overlay */}
+      {viewerIndex !== null && activePhotos[viewerIndex] && (
+        <div className="fixed inset-0 z-50 bg-black/98 flex flex-col items-center justify-center backdrop-blur-xl animate-in fade-in duration-300">
+          <div className="absolute top-0 w-full p-6 flex justify-between items-center text-white z-10">
+            <div className="flex flex-col">
+              <span className="text-lg font-black truncate max-w-xs">{activePhotos[viewerIndex].name}</span>
+              <span className="text-[10px] text-slate-400 font-bold uppercase tracking-[0.2em] mt-1 flex items-center gap-2">
+                <Folder size={10} /> {activePhotos[viewerIndex].folderName || currentAlbum?.name} &bull; {viewerIndex + 1} / {activePhotos.length}
+              </span>
+            </div>
+            <button onClick={() => setViewerIndex(null)} className="p-3 bg-white/5 hover:bg-white/20 rounded-full transition-all ring-1 ring-white/10"><X size={28} /></button>
+          </div>
+
+          <button onClick={() => navigateViewer(-1)} className="absolute left-6 p-5 text-white bg-white/5 hover:bg-white/20 rounded-full hidden md:block transition-all"><ChevronLeft size={40} /></button>
+          <button onClick={() => navigateViewer(1)} className="absolute right-6 p-5 text-white bg-white/5 hover:bg-white/20 rounded-full hidden md:block transition-all"><ChevronRight size={40} /></button>
+
+          <div className="w-full max-h-[75vh] flex items-center justify-center p-4">
+            <img src={activePhotos[viewerIndex].url} alt="" className="max-w-full max-h-full object-contain shadow-2xl rounded-sm" />
+          </div>
+
+          <div className="absolute bottom-8 w-full">
+             <div className="flex justify-center gap-3 overflow-x-auto no-scrollbar py-4 px-10 max-w-4xl mx-auto">
+              {activePhotos.map((img, idx) => (
+                <img key={img.id} src={img.url} onClick={() => setViewerIndex(idx)}
+                     className={`h-16 w-16 flex-shrink-0 object-cover rounded-xl cursor-pointer transition-all duration-300 border-2 ${idx === viewerIndex ? 'border-blue-500 scale-125 ring-4 ring-blue-500/20 brightness-110 z-10' : 'border-transparent opacity-30 hover:opacity-100 hover:scale-110'}`} />
               ))}
             </div>
           </div>
+          
+          <div className="absolute bottom-4 text-[10px] text-white/30 uppercase tracking-widest hidden md:block font-bold">
+            Left/Right to Nav • Esc to Close • Del to Delete
+          </div>
         </div>
-      </div>
+      )}
+
+      {/* Inputs */}
+      <input type="file" multiple accept="image/*" ref={fileInputRef} className="hidden" onChange={handleFileUpload} />
+      <input type="file" webkitdirectory="true" directory="" ref={folderInputRef} className="hidden" onChange={handleFileUpload} />
+
+      <style dangerouslySetInnerHTML={{ __html: `
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+      `}} />
     </div>
   );
 };
