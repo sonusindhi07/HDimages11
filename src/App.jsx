@@ -1,492 +1,250 @@
-import React, { useState, useRef, useEffect, useCallback, useMemo, useReducer } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
-  Image as ImageIcon, 
-  Trash2, 
-  ChevronLeft, 
-  ChevronRight,
-  Upload, 
-  Folder,
-  Plus,
-  X,
-  FolderPlus,
-  FolderUp,
-  Loader2,
-  CheckCircle2,
+  Download, 
+  Link as LinkIcon, 
+  Youtube, 
+  Instagram, 
+  Loader2, 
+  CheckCircle2, 
   AlertCircle,
-  WifiOff
+  Play,
+  Settings2,
+  History
 } from 'lucide-react';
 
-// --- API CONFIGURATION ---
-const BASE_URL = 'https://694d4185ad0f8c8e6e203206.mockapi.io/albums';
-const RESOURCE_ID = '1'; // Using a single document to store the nested structure
-
-// --- STATE MANAGEMENT ---
-const initialState = {
-  items: [],
-  status: 'loading', 
-  syncing: false,
-  error: null
-};
-
-function albumReducer(state, action) {
-  switch (action.type) {
-    case 'FETCH_START':
-      return { ...state, status: 'loading', error: null };
-    case 'FETCH_SUCCESS':
-      return { ...state, status: 'succeeded', items: action.payload, error: null };
-    case 'FETCH_ERROR':
-      return { ...state, status: 'failed', error: action.payload };
-    case 'SYNC_START':
-      return { ...state, syncing: true };
-    case 'SYNC_END':
-      return { ...state, syncing: false };
-    case 'SET_ITEMS':
-      return { ...state, items: action.payload };
-    default:
-      return state;
-  }
-}
-
 const App = () => {
-  const [state, dispatch] = useReducer(albumReducer, initialState);
-  const { items: albums, status, syncing, error } = state;
-  
-  const [currentPath, setCurrentPath] = useState([]); 
-  const [isCreatingAlbum, setIsCreatingAlbum] = useState(false);
-  const [newAlbumName, setNewAlbumName] = useState('');
-  const [viewerIndex, setViewerIndex] = useState(null); 
-  
-  const fileInputRef = useRef(null);
-  const folderInputRef = useRef(null);
+  const [url, setUrl] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [status, setStatus] = useState('idle'); // idle, processing, success, error
+  const [errorMsg, setErrorMsg] = useState('');
+  const [downloadHistory, setDownloadHistory] = useState([]);
+  const [selectedQuality, setSelectedQuality] = useState('1080p');
 
-  // --- API OPERATIONS ---
-  const loadData = async () => {
-    dispatch({ type: 'FETCH_START' });
-    try {
-      // Attempt to fetch all data first to see if the collection is even accessible
-      const checkAll = await fetch(BASE_URL);
-      
-      if (!checkAll.ok) {
-        throw new Error(`Cloud storage is currently unreachable (Error ${checkAll.status})`);
-      }
-
-      const allData = await checkAll.json();
-      
-      // Look for our target resource in the list
-      const targetResource = Array.isArray(allData) ? allData.find(item => item.id === RESOURCE_ID) : null;
-
-      if (targetResource) {
-        dispatch({ type: 'FETCH_SUCCESS', payload: targetResource.data || [] });
-        return;
-      }
-
-      // If target doesn't exist, try to initialize it
-      const createResponse = await fetch(BASE_URL, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ id: RESOURCE_ID, data: [] })
-      });
-      
-      if (!createResponse.ok) {
-        // If POST failed, but we have other data, just use the first available record as a fallback
-        if (Array.isArray(allData) && allData.length > 0) {
-          dispatch({ type: 'FETCH_SUCCESS', payload: allData[0].data || [] });
-          return;
-        }
-        throw new Error('Could not initialize storage. The API might be full or restricted.');
-      }
-      
-      dispatch({ type: 'FETCH_SUCCESS', payload: [] });
-    } catch (err) {
-      dispatch({ type: 'FETCH_ERROR', payload: err.message });
-    }
+  // Detect platform based on URL
+  const getPlatform = (link) => {
+    if (link.includes('youtube.com') || link.includes('youtu.be')) return 'YouTube';
+    if (link.includes('instagram.com')) return 'Instagram';
+    return 'Unknown';
   };
 
-  useEffect(() => {
-    loadData();
-  }, []);
-
-  const persistToMockAPI = async (newAlbums) => {
-    dispatch({ type: 'SYNC_START' });
-    try {
-      const response = await fetch(`${BASE_URL}/${RESOURCE_ID}`, {
-        method: 'PUT',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ data: newAlbums })
-      });
-      // If PUT fails with 404/500, attempt to POST (re-initialize) if it was deleted
-      if (!response.ok) {
-         await fetch(BASE_URL, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ id: RESOURCE_ID, data: newAlbums })
-        });
-      }
-    } catch (err) {
-      console.error("API Sync Error:", err);
-    } finally {
-      dispatch({ type: 'SYNC_END' });
-    }
+  const validateUrl = (link) => {
+    const youtubeRegex = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/.+$/;
+    const instagramRegex = /^(https?:\/\/)?(www\.)?instagram\.com\/(p|reels|reel|tv)\/.+$/;
+    return youtubeRegex.test(link) || instagramRegex.test(link);
   };
 
-  const updateAndPersist = async (newAlbums) => {
-    dispatch({ type: 'SET_ITEMS', payload: newAlbums });
-    await persistToMockAPI(newAlbums);
-  };
-
-  // --- LOGIC ---
-  const getPlaceholderUrl = (seed) => {
-    return `https://picsum.photos/seed/${seed}/800/600`;
-  };
-
-  const getCurrentDirectory = useCallback(() => {
-    let current = albums;
-    for (const id of currentPath) {
-      const folder = current.find(a => a.id === id);
-      if (folder) current = folder.subAlbums || [];
-    }
-    return current;
-  }, [albums, currentPath]);
-
-  const getCurrentAlbum = useCallback(() => {
-    if (currentPath.length === 0) return null;
-    let current = null;
-    let list = albums;
-    for (const id of currentPath) {
-      current = list.find(a => a.id === id);
-      list = current?.subAlbums || [];
-    }
-    return current;
-  }, [albums, currentPath]);
-
-  const activePhotos = useMemo(() => {
-    const album = getCurrentAlbum();
-    return album ? (album.images || []) : [];
-  }, [getCurrentAlbum]);
-
-  const handleFileUpload = async (e) => {
-    const files = e.target.files ? Array.from(e.target.files) : [];
-    if (!files.length || currentPath.length === 0) return;
-
-    const newImages = files.map(file => ({
-      id: Math.random().toString(36).substr(2, 9),
-      name: file.name,
-      url: getPlaceholderUrl(encodeURIComponent(file.name + Math.random())), 
-      size: (file.size / 1024).toFixed(1) + ' KB',
-      timestamp: Date.now()
-    }));
-
-    const updateRecursive = (list) => {
-      return list.map(item => {
-        if (item.id === currentPath[currentPath.length - 1]) {
-          return { ...item, images: [...(item.images || []), ...newImages] };
-        }
-        if (item.subAlbums) {
-          return { ...item, subAlbums: updateRecursive(item.subAlbums) };
-        }
-        return item;
-      });
-    };
+  const handleDownload = async (e) => {
+    e.preventDefault();
     
-    await updateAndPersist(updateRecursive(albums));
-    e.target.value = '';
-  };
+    if (!url) {
+      setErrorMsg('Please paste a link first.');
+      setStatus('error');
+      return;
+    }
 
-  const createAlbum = async () => {
-    if (!newAlbumName.trim()) return;
-    const newAlbum = {
-      id: Math.random().toString(36).substr(2, 9),
-      name: newAlbumName,
-      images: [],
-      subAlbums: []
-    };
+    if (!validateUrl(url)) {
+      setErrorMsg('Invalid URL. Please provide a valid YouTube or Instagram link.');
+      setStatus('error');
+      return;
+    }
 
-    let nextAlbums;
-    if (currentPath.length === 0) {
-      nextAlbums = [...albums, newAlbum];
-    } else {
-      const updateRecursive = (list) => {
-        return list.map(item => {
-          if (item.id === currentPath[currentPath.length - 1]) {
-            return { ...item, subAlbums: [...(item.subAlbums || []), newAlbum] };
-          }
-          if (item.subAlbums) {
-            return { ...item, subAlbums: updateRecursive(item.subAlbums) };
-          }
-          return item;
-        });
+    setStatus('processing');
+    setLoading(true);
+
+    // Simulate API Call for downloading
+    // In a real scenario, this would call a backend service that interacts with yt-dlp or similar
+    try {
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      
+      const newEntry = {
+        id: Date.now(),
+        url,
+        platform: getPlatform(url),
+        quality: selectedQuality,
+        date: new Date().toLocaleTimeString(),
       };
-      nextAlbums = updateRecursive(albums);
+
+      setDownloadHistory([newEntry, ...downloadHistory].slice(0, 5));
+      setStatus('success');
+      setUrl('');
+    } catch (err) {
+      setErrorMsg('Server busy. Please try again later.');
+      setStatus('error');
+    } finally {
+      setLoading(false);
     }
-    
-    await updateAndPersist(nextAlbums);
-    setNewAlbumName('');
-    setIsCreatingAlbum(false);
   };
-
-  const deleteAlbum = async (e, id) => {
-    e.stopPropagation();
-    const deleteRecursive = (list) => {
-      return list.filter(item => {
-        if (item.id === id) return false;
-        if (item.subAlbums) {
-          item.subAlbums = deleteRecursive(item.subAlbums);
-        }
-        return true;
-      });
-    };
-    await updateAndPersist(deleteRecursive([...albums]));
-  };
-
-  const deleteImage = async (e, imageId) => {
-    e.stopPropagation();
-    const deleteFromRecursive = (list) => {
-      return list.map(item => {
-        const newItem = { ...item };
-        if (newItem.images) newItem.images = newItem.images.filter(img => img.id !== imageId);
-        if (newItem.subAlbums) newItem.subAlbums = deleteFromRecursive(newItem.subAlbums);
-        return newItem;
-      });
-    };
-    await updateAndPersist(deleteFromRecursive([...albums]));
-  };
-
-  if (status === 'loading') {
-    return (
-      <div className="fixed inset-0 flex flex-col items-center justify-center bg-white z-[100]">
-        <Loader2 className="w-10 h-10 text-indigo-600 animate-spin mb-4" />
-        <p className="text-xs font-black text-slate-400 uppercase tracking-widest text-center">
-          Connecting to MockAPI Albums...
-        </p>
-      </div>
-    );
-  }
-
-  if (status === 'failed') {
-    return (
-      <div className="fixed inset-0 flex flex-col items-center justify-center bg-white z-[100] px-6">
-        <WifiOff className="w-12 h-12 text-red-400 mb-4" />
-        <h2 className="text-lg font-black text-slate-800 mb-2">Sync Error</h2>
-        <p className="text-slate-500 text-sm mb-6 text-center max-w-xs">{error}</p>
-        <button onClick={loadData} className="px-6 py-2 bg-indigo-600 text-white rounded-xl font-bold shadow-lg">Retry Connection</button>
-      </div>
-    );
-  }
-
-  const currentItems = getCurrentDirectory();
-  const currentAlbum = getCurrentAlbum();
 
   return (
-    <div className="flex flex-col h-screen bg-slate-50 text-slate-900 font-sans overflow-hidden">
-      {/* Sync Status Overlay */}
-      <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 px-4 py-2 bg-white rounded-full shadow-lg border text-[10px] font-black uppercase tracking-widest">
-        {syncing ? (
-          <>
-            <Loader2 size={12} className="text-indigo-600 animate-spin" /> 
-            <span className="text-indigo-600">Syncing to Albums...</span>
-          </>
-        ) : (
-          <>
-            <CheckCircle2 size={12} className="text-green-500" /> 
-            <span className="text-slate-500">Albums Live</span>
-          </>
-        )}
-      </div>
-
-      <header className="bg-white border-b flex-shrink-0 z-20 shadow-sm">
-        <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-3 cursor-pointer" onClick={() => setCurrentPath([])}>
-            <div className="bg-indigo-600 p-2 rounded-xl shadow-lg">
-              <ImageIcon className="text-white w-5 h-5" />
-            </div>
-            <h1 className="text-xl font-black tracking-tight text-slate-800">FireVault</h1>
+    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans">
+      {/* Navigation */}
+      <nav className="bg-white border-b border-slate-200 px-6 py-4">
+        <div className="max-w-5xl mx-auto flex justify-between items-center">
+          <div className="flex items-center gap-2 font-bold text-xl text-indigo-600">
+            <Download className="w-6 h-6" />
+            <span>StreamFetch</span>
           </div>
-          <div className="flex items-center gap-2">
-            <button 
-              onClick={() => folderInputRef.current?.click()} 
-              className="bg-white border px-4 py-2 rounded-full text-xs font-bold transition-all flex items-center gap-2 hover:bg-slate-50 active:scale-95"
-            >
-              <FolderUp size={14} /> <span className="hidden sm:inline">Import Folder</span>
-            </button>
-            {currentPath.length > 0 && (
-              <button 
-                onClick={() => fileInputRef.current?.click()} 
-                className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-full text-xs font-bold shadow-md flex items-center gap-2 transition-all active:scale-95"
-              >
-                <Upload size={14} /> <span>Upload</span>
-              </button>
-            )}
+          <div className="hidden md:flex gap-6 text-sm font-medium text-slate-600">
+            <a href="#" className="hover:text-indigo-600 transition-colors">How it works</a>
+            <a href="#" className="hover:text-indigo-600 transition-colors">Supported Sites</a>
+            <a href="#" className="hover:text-indigo-600 transition-colors">Privacy</a>
           </div>
         </div>
-      </header>
+      </nav>
 
-      <main className="flex-1 overflow-y-auto">
-        <div className="max-w-7xl mx-auto px-4 py-8">
-          {/* Breadcrumbs */}
-          <div className="mb-6 flex items-center gap-2 text-[10px] text-slate-400 font-black tracking-widest uppercase bg-white border px-4 py-2.5 rounded-xl shadow-sm overflow-x-auto whitespace-nowrap">
-            <span className="hover:text-indigo-600 cursor-pointer transition-colors" onClick={() => setCurrentPath([])}>Root</span>
-            {currentPath.map((id, index) => (
-              <React.Fragment key={id}>
-                <ChevronRight size={12} className="flex-shrink-0" />
-                <span 
-                  className="text-indigo-600 truncate max-w-[120px] cursor-pointer"
-                  onClick={() => setCurrentPath(currentPath.slice(0, index + 1))}
-                >
-                  {id}
+      <main className="max-w-5xl mx-auto px-6 py-12">
+        {/* Hero Section */}
+        <div className="text-center mb-12">
+          <h1 className="text-4xl md:text-5xl font-extrabold mb-4 tracking-tight">
+            Download <span className="text-indigo-600">Videos & Reels</span> Instantly
+          </h1>
+          <p className="text-slate-500 text-lg max-w-2xl mx-auto">
+            High-quality video downloader for YouTube and Instagram. Just paste the link and save your favorite content in seconds.
+          </p>
+        </div>
+
+        {/* Input Card */}
+        <div className="bg-white rounded-2xl shadow-xl shadow-slate-200/60 p-6 md:p-8 mb-10 border border-slate-100">
+          <form onSubmit={handleDownload} className="space-y-6">
+            <div className="relative">
+              <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                <LinkIcon className="h-5 w-5 text-slate-400" />
+              </div>
+              <input
+                type="text"
+                className="block w-full pl-11 pr-4 py-4 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition-all text-slate-700 placeholder:text-slate-400"
+                placeholder="Paste YouTube or Instagram link here..."
+                value={url}
+                onChange={(e) => {
+                  setUrl(e.target.value);
+                  if (status !== 'idle') setStatus('idle');
+                }}
+              />
+            </div>
+
+            <div className="flex flex-col md:flex-row gap-4">
+              <div className="flex-1 flex items-center gap-4 bg-slate-50 p-2 rounded-xl border border-slate-200">
+                <span className="pl-3 text-sm font-semibold text-slate-500 flex items-center gap-1">
+                  <Settings2 className="w-4 h-4" /> Quality:
                 </span>
-              </React.Fragment>
-            ))}
-          </div>
-
-          <div className="mb-8 flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              {currentPath.length > 0 && (
-                <button 
-                  onClick={() => setCurrentPath(prev => prev.slice(0, -1))} 
-                  className="p-2.5 bg-white border rounded-xl hover:bg-slate-50 shadow-sm transition-all active:scale-90"
-                >
-                  <ChevronLeft size={18} />
-                </button>
-              )}
-              <h2 className="text-2xl font-black text-slate-800 truncate max-w-[200px] sm:max-w-md">
-                {currentPath.length === 0 ? "Cloud Library" : currentAlbum?.name}
-              </h2>
-            </div>
-            <button 
-              onClick={() => setIsCreatingAlbum(true)} 
-              className="bg-white border-2 border-slate-100 text-slate-700 hover:border-indigo-500 hover:text-indigo-600 px-5 py-2 rounded-xl font-bold transition-all text-xs flex items-center gap-2 shadow-sm active:scale-95"
-            >
-              <FolderPlus size={16} /> New Folder
-            </button>
-          </div>
-
-          {/* Grid Layout */}
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-5">
-            {isCreatingAlbum && (
-              <div className="bg-white p-4 rounded-xl border-2 border-dashed border-indigo-300 flex flex-col gap-3 shadow-lg animate-in zoom-in-95">
-                <input 
-                  autoFocus 
-                  className="w-full px-3 py-2 border rounded-lg text-xs font-bold outline-none border-indigo-100 focus:border-indigo-500 transition-colors" 
-                  placeholder="Folder Name..." 
-                  value={newAlbumName} 
-                  onChange={(e) => setNewAlbumName(e.target.value)} 
-                  onKeyDown={(e) => e.key === 'Enter' && createAlbum()} 
-                />
                 <div className="flex gap-2">
-                  <button onClick={createAlbum} className="flex-1 bg-indigo-600 text-white py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider">Create</button>
-                  <button onClick={() => setIsCreatingAlbum(false)} className="flex-1 bg-slate-100 py-1.5 rounded-lg text-[10px] font-bold">X</button>
+                  {['720p', '1080p', '4K'].map((q) => (
+                    <button
+                      key={q}
+                      type="button"
+                      onClick={() => setSelectedQuality(q)}
+                      className={`px-3 py-1 text-xs font-bold rounded-lg transition-all ${
+                        selectedQuality === q 
+                        ? 'bg-indigo-600 text-white shadow-md' 
+                        : 'bg-white text-slate-600 hover:bg-slate-200'
+                      }`}
+                    >
+                      {q}
+                    </button>
+                  ))}
                 </div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={loading}
+                className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white font-bold py-4 px-8 rounded-xl flex items-center justify-center gap-2 transition-all shadow-lg shadow-indigo-200 min-w-[180px]"
+              >
+                {loading ? (
+                  <>
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    Processing...
+                  </>
+                ) : (
+                  <>
+                    <Download className="w-5 h-5" />
+                    Download Now
+                  </>
+                )}
+              </button>
+            </div>
+          </form>
+
+          {/* Status Indicators */}
+          <div className="mt-6">
+            {status === 'success' && (
+              <div className="bg-emerald-50 border border-emerald-100 text-emerald-700 px-4 py-3 rounded-lg flex items-center gap-3 animate-in fade-in slide-in-from-top-2">
+                <CheckCircle2 className="w-5 h-5" />
+                <span className="text-sm font-medium">Link processed successfully! Your download will start automatically.</span>
               </div>
             )}
-
-            {currentItems.map(album => (
-              <div key={album.id} onClick={() => setCurrentPath([...currentPath, album.id])}
-                   className="group relative bg-white rounded-2xl border shadow-sm hover:shadow-xl transition-all cursor-pointer overflow-hidden border-transparent hover:border-indigo-100">
-                <div className="aspect-square bg-slate-100 flex items-center justify-center relative">
-                  {album.images?.[0] ? 
-                    <img src={album.images[0].url} alt="" className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" /> : 
-                    <Folder size={40} className="text-slate-300 group-hover:text-indigo-400 transition-colors" />
-                  }
-                  <button 
-                    onClick={(e) => deleteAlbum(e, album.id)} 
-                    className="absolute top-2 right-2 p-1.5 bg-white/90 text-slate-400 hover:bg-red-500 hover:text-white rounded-lg opacity-0 group-hover:opacity-100 shadow-sm transition-all"
-                  >
-                    <Trash2 size={12} />
-                  </button>
-                  <div className="absolute bottom-2 right-2 bg-black/60 backdrop-blur-md px-2 py-0.5 rounded text-[9px] text-white font-bold">
-                    {album.images?.length || 0}
-                  </div>
-                </div>
-                <div className="p-3">
-                  <h3 className="font-bold truncate text-slate-800 text-xs">{album.name}</h3>
-                </div>
+            {status === 'error' && (
+              <div className="bg-rose-50 border border-rose-100 text-rose-700 px-4 py-3 rounded-lg flex items-center gap-3">
+                <AlertCircle className="w-5 h-5" />
+                <span className="text-sm font-medium">{errorMsg}</span>
               </div>
-            ))}
-
-            {activePhotos.map((image, index) => (
-              <div key={image.id} onClick={() => setViewerIndex(index)}
-                   className="group relative bg-white rounded-xl border overflow-hidden shadow-sm hover:shadow-xl transition-all cursor-zoom-in">
-                <div className="aspect-[4/3] bg-slate-200 overflow-hidden relative">
-                  <img 
-                    src={image.url} 
-                    alt={image.name} 
-                    className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-1000" 
-                    loading="lazy"
-                    onError={(e) => { e.target.src = 'https://placehold.co/400x300?text=Image+Unavailable'; }} 
-                  />
-                  <button 
-                    onClick={(e) => deleteImage(e, image.id)} 
-                    className="absolute top-2 right-2 p-1.5 bg-black/40 text-white rounded-lg opacity-0 group-hover:opacity-100 hover:bg-red-600 transition-all"
-                  >
-                    <Trash2 size={12} />
-                  </button>
-                </div>
-                <div className="p-2 border-t flex justify-between items-center bg-white">
-                  <p className="text-[9px] font-bold truncate text-slate-500 uppercase tracking-tighter w-full">{image.name}</p>
-                </div>
-              </div>
-            ))}
-            
-            {currentPath.length > 0 && (
-               <div onClick={() => fileInputRef.current?.click()} className="aspect-square rounded-2xl border-2 border-dashed border-slate-200 flex flex-col items-center justify-center gap-2 cursor-pointer hover:bg-indigo-50 hover:border-indigo-300 transition-all text-slate-300 hover:text-indigo-500 bg-white group active:scale-95">
-                  <Plus size={24} className="group-hover:rotate-90 transition-transform duration-300" />
-                  <span className="text-[9px] font-black uppercase tracking-widest">Add Photos</span>
-                </div>
             )}
           </div>
-          
-          {albums.length === 0 && status === 'succeeded' && !isCreatingAlbum && (
-            <div className="mt-20 flex flex-col items-center justify-center opacity-40">
-              <Folder size={64} className="mb-4 text-indigo-300" />
-              <p className="font-bold uppercase tracking-widest text-xs text-center leading-relaxed">Your cloud vault is empty.<br/>Create a folder to begin.</p>
-            </div>
-          )}
         </div>
+
+        {/* Feature Highlights */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12">
+          <div className="p-6 bg-white rounded-xl border border-slate-100 text-center">
+            <div className="w-12 h-12 bg-red-100 text-red-600 rounded-full flex items-center justify-center mx-auto mb-4">
+              <Youtube className="w-6 h-6" />
+            </div>
+            <h3 className="font-bold mb-2">YouTube Support</h3>
+            <p className="text-sm text-slate-500 text-balance">Download full videos, shorts, or just the audio in high bitrate.</p>
+          </div>
+          <div className="p-6 bg-white rounded-xl border border-slate-100 text-center">
+            <div className="w-12 h-12 bg-pink-100 text-pink-600 rounded-full flex items-center justify-center mx-auto mb-4">
+              <Instagram className="w-6 h-6" />
+            </div>
+            <h3 className="font-bold mb-2">Instagram Reels</h3>
+            <p className="text-sm text-slate-500 text-balance">Save Reels and IGTV videos directly to your device gallery.</p>
+          </div>
+          <div className="p-6 bg-white rounded-xl border border-slate-100 text-center">
+            <div className="w-12 h-12 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center mx-auto mb-4">
+              <History className="w-6 h-6" />
+            </div>
+            <h3 className="font-bold mb-2">Fast & Free</h3>
+            <p className="text-sm text-slate-500 text-balance">No registration required. Unlimited downloads at maximum speed.</p>
+          </div>
+        </div>
+
+        {/* Recent Downloads Simulation */}
+        {downloadHistory.length > 0 && (
+          <div className="animate-in fade-in duration-700">
+            <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
+              <History className="w-5 h-5 text-slate-400" />
+              Recent Activity
+            </h2>
+            <div className="bg-white rounded-xl border border-slate-200 divide-y divide-slate-100 overflow-hidden">
+              {downloadHistory.map((item) => (
+                <div key={item.id} className="p-4 flex items-center justify-between hover:bg-slate-50 transition-colors">
+                  <div className="flex items-center gap-4">
+                    <div className={`p-2 rounded-lg ${item.platform === 'YouTube' ? 'bg-red-50 text-red-500' : 'bg-pink-50 text-pink-500'}`}>
+                      {item.platform === 'YouTube' ? <Youtube className="w-5 h-5" /> : <Instagram className="w-5 h-5" />}
+                    </div>
+                    <div>
+                      <p className="text-sm font-semibold truncate max-w-[200px] md:max-w-md">
+                        {item.url}
+                      </p>
+                      <div className="flex gap-3 text-xs text-slate-400 mt-1">
+                        <span>{item.date}</span>
+                        <span>•</span>
+                        <span className="uppercase">{item.quality}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <button className="text-indigo-600 hover:text-indigo-800 p-2">
+                    <Play className="w-5 h-5 fill-current" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </main>
 
-      {/* Lightbox Viewer */}
-      {viewerIndex !== null && activePhotos[viewerIndex] && (
-        <div className="fixed inset-0 z-[110] bg-slate-950/98 flex flex-col items-center justify-center animate-in fade-in duration-300">
-          <button 
-            onClick={() => setViewerIndex(null)} 
-            className="absolute top-6 right-6 p-3 text-white hover:bg-white/10 rounded-full transition-all active:scale-90"
-          >
-            <X size={32} />
-          </button>
-          
-          <div className="w-full flex items-center justify-between px-6 sm:px-10 absolute pointer-events-none">
-             <button 
-                onClick={(e) => { e.stopPropagation(); setViewerIndex(prev => (prev - 1 + activePhotos.length) % activePhotos.length); }}
-                className="p-4 bg-white/5 hover:bg-white/20 text-white rounded-full pointer-events-auto transition-all active:scale-75 backdrop-blur-sm"
-             >
-                <ChevronLeft size={32} />
-             </button>
-             <button 
-                onClick={(e) => { e.stopPropagation(); setViewerIndex(prev => (prev + 1) % activePhotos.length); }}
-                className="p-4 bg-white/5 hover:bg-white/20 text-white rounded-full pointer-events-auto transition-all active:scale-75 backdrop-blur-sm"
-             >
-                <ChevronRight size={32} />
-             </button>
-          </div>
-
-          <div className="w-full max-h-[80vh] flex items-center justify-center p-6">
-            <img 
-              src={activePhotos[viewerIndex].url} 
-              alt="" 
-              className="max-w-full max-h-full object-contain shadow-2xl rounded-lg animate-in zoom-in-95 duration-500" 
-            />
-          </div>
-          
-          <div className="absolute bottom-10 px-8 py-4 bg-white/10 backdrop-blur-2xl rounded-2xl border border-white/10 flex flex-col items-center gap-1 mx-4 text-center">
-            <p className="text-white text-base font-black tracking-tight">{activePhotos[viewerIndex].name}</p>
-            <p className="text-white/40 text-[10px] uppercase font-bold tracking-widest">{viewerIndex + 1} / {activePhotos.length}</p>
-          </div>
-        </div>
-      )}
-
-      {/* Hidden Inputs */}
-      <input type="file" multiple accept="image/*" ref={fileInputRef} className="hidden" onChange={handleFileUpload} />
-      <input type="file" webkitdirectory="true" directory="" ref={folderInputRef} className="hidden" onChange={handleFileUpload} />
+      <footer className="max-w-5xl mx-auto px-6 py-8 border-t border-slate-200 mt-12 text-center text-slate-400 text-sm">
+        <p>© 2024 StreamFetch Downloader. For personal use only. Please respect copyright laws.</p>
+      </footer>
     </div>
   );
 };
